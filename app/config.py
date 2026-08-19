@@ -2,9 +2,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    telegram_api_id: int
-    telegram_api_hash: str
-    telegram_session: str
+    telegram_api_id: int | None = None
+    telegram_api_hash: str | None = None
+    telegram_session: str | None = None
+    telegram_session_file_b64: str | None = None
     telegram_bot_token: str
     target_channel: str
     openai_api_key: str
@@ -12,6 +13,7 @@ class Settings(BaseSettings):
     auto_publish: bool = False
     min_publish_score: int = 70
     database_path: str = "data/news.db"
+    session_file_path: str = "data/telegram_reader.session"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
