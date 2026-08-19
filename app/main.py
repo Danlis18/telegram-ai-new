@@ -1,6 +1,9 @@
 import asyncio
+import base64
 import logging
-from telethon import TelegramClient, events
+from pathlib import Path
+
+from telethon import TelegramClient as TelethonClient, events
 from telethon.sessions import StringSession
 from telegram import Bot
 
@@ -12,7 +15,30 @@ from app.sources import SOURCES
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("telegram-ai-news")
 
-reader = TelegramClient(StringSession(settings.telegram_session), settings.telegram_api_id, settings.telegram_api_hash)
+
+def build_reader():
+    if settings.telegram_session_file_b64:
+        from opentele2.tl import TelegramClient as DesktopTelegramClient
+
+        session_path = Path(settings.session_file_path)
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        session_path.write_bytes(base64.b64decode(settings.telegram_session_file_b64))
+        return DesktopTelegramClient(str(session_path))
+
+    if settings.telegram_session and settings.telegram_api_id and settings.telegram_api_hash:
+        return TelethonClient(
+            StringSession(settings.telegram_session),
+            settings.telegram_api_id,
+            settings.telegram_api_hash,
+        )
+
+    raise RuntimeError(
+        "Telegram reader is not configured. Set TELEGRAM_SESSION_FILE_B64 for migrated tdata, "
+        "or TELEGRAM_SESSION + TELEGRAM_API_ID + TELEGRAM_API_HASH."
+    )
+
+
+reader = build_reader()
 publisher = Bot(settings.telegram_bot_token)
 
 
