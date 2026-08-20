@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import html
 import logging
 import re
@@ -6,6 +7,8 @@ import time
 from contextlib import suppress
 from io import BytesIO
 
+import httpx
+from openai import AsyncOpenAI
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -27,6 +30,27 @@ from app.formatting import post_html
 from app.sources import SOURCES
 
 log = logging.getLogger("telegram-ai-news.admin-bot")
+image_debug_client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+
+def _debug_image_model() -> str:
+    configured = (settings.openai_image_model or "").strip()
+    if not configured or configured == "gpt-image-1":
+        return "gpt-image-2"
+    return configured
+
+
+async def _debug_result_bytes(item) -> bytes:
+    b64 = getattr(item, "b64_json", None)
+    if b64:
+        return base64.b64decode(b64)
+    url = getattr(item, "url", None)
+    if url:
+        async with httpx.AsyncClient(timeout=120) as http:
+            response = await http.get(url)
+            response.raise_for_status()
+            return response.content
+    raise RuntimeError("OpenAI returned neither b64_json nor url")
 
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -91,6 +115,106 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=main_menu(),
     )
+
+
+async def cmd_testimage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    model = _debug_image_model()
+    status = await update.message.reply_text(
+        f"🧪 <b>TEST GENERATE</b>\n\nModel: <code>{html.escape(model)}</code>\nВикликаю OpenAI images.generate напряму — без логотипа, без нашого редактора.",
+        parse_mode="HTML",
+    )
+    try:
+        result = await image_debug_client.images.generate(
+            model=model,
+            prompt=(
+                "Photorealistic football action photograph during an evening match, one player controlling the ball, "
+                "natural stadium lighting, realistic skin and anatomy, no text, no logos, no watermark, no poster design."
+            ),
+            size="1024x1024",
+        )
+        if not result.data:
+            raise RuntimeError("images.generate returned empty data")
+        image_bytes = await _debug_result_bytes(result.data[0])
+        buf = BytesIO(image_bytes)
+        buf.name = "openai_generate_test.png"
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=buf,
+            caption=f"✅ <b>GENERATE API ПРАЦЮЄ</b>\nModel: <code>{html.escape(model)}</code>\nЦе прямий результат OpenAI без logo/post-processing.",
+            parse_mode="HTML",
+        )
+        with suppress(Exception):
+            await status.delete()
+    except Exception as exc:
+        log.exception("Direct image generation test failed")
+        await status.edit_text(
+            "❌ <b>GENERATE API НЕ ПРАЦЮЄ</b>\n\n"
+            f"Model: <code>{html.escape(model)}</code>\n"
+            f"Type: <code>{html.escape(type(exc).__name__)}</code>\n"
+            f"Error: <code>{html.escape(str(exc)[:2500])}</code>",
+            parse_mode="HTML",
+        )
+
+
+async def cmd_testedit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    replied = update.message.reply_to_message
+    if not replied or not replied.photo:
+        await update.message.reply_text(
+            "🧪 Для тесту EDIT: <b>відповідай командою /testedit саме на повідомлення з фото</b>.\n\n"
+            "Цей тест напряму викличе OpenAI images.edit — без класифікатора, без логотипа і без нашого post-processing.",
+            parse_mode="HTML",
+        )
+        return
+
+    model = _debug_image_model()
+    status = await update.message.reply_text(
+        f"🧪 <b>TEST EDIT</b>\n\nModel: <code>{html.escape(model)}</code>\nЗавантажую фото і напряму викликаю images.edit…",
+        parse_mode="HTML",
+    )
+    try:
+        tg_file = await context.bot.get_file(replied.photo[-1].file_id)
+        source = bytes(await tg_file.download_as_bytearray())
+        if not source:
+            raise RuntimeError("Telegram returned empty photo bytes")
+
+        image_file = BytesIO(source)
+        image_file.name = "test_source.jpg"
+        result = await image_debug_client.images.edit(
+            model=model,
+            image=image_file,
+            prompt=(
+                "Edit this exact source image. Remove all added text, captions, graphic labels, channel/media watermarks, "
+                "bookmaker/casino branding and other overlaid graphics. Preserve the underlying photograph as closely as possible: "
+                "same person, face, body, pose, clothing, crop, background, colors, lighting and shadows. "
+                "Do not add any new text or logo. Reconstruct only areas previously covered by overlays."
+            ),
+        )
+        if not result.data:
+            raise RuntimeError("images.edit returned empty data")
+        image_bytes = await _debug_result_bytes(result.data[0])
+        buf = BytesIO(image_bytes)
+        buf.name = "openai_edit_test.png"
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=buf,
+            caption=f"✅ <b>EDIT API ПРАЦЮЄ</b>\nModel: <code>{html.escape(model)}</code>\nЦе прямий images.edit без classifier/logo/post-processing.",
+            parse_mode="HTML",
+        )
+        with suppress(Exception):
+            await status.delete()
+    except Exception as exc:
+        log.exception("Direct image edit test failed")
+        await status.edit_text(
+            "❌ <b>EDIT API НЕ ПРАЦЮЄ</b>\n\n"
+            f"Model: <code>{html.escape(model)}</code>\n"
+            f"Type: <code>{html.escape(type(exc).__name__)}</code>\n"
+            f"Error: <code>{html.escape(str(exc)[:2500])}</code>",
+            parse_mode="HTML",
+        )
 
 
 async def show_queue(query):
@@ -474,6 +598,8 @@ async def start_admin_bot() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("testimage", cmd_testimage))
+    app.add_handler(CommandHandler("testedit", cmd_testedit))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_editor_text))
     await app.initialize()
@@ -482,6 +608,8 @@ async def start_admin_bot() -> Application:
     await app.bot.set_my_commands([
         ("start", "Відкрити SPORTS NEWS CONTROL"),
         ("menu", "Головне меню"),
+        ("testimage", "Тест прямої генерації OpenAI"),
+        ("testedit", "Тест прямого редагування фото"),
         ("id", "Показати Telegram ID"),
     ])
     return app
