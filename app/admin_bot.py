@@ -46,7 +46,7 @@ def item_menu(row: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}")],
     ]
     if row.get("media_type") == "photo":
-        rows.append([InlineKeyboardButton("🖼 Перегенерувати фото", callback_data=f"regen_image:{news_id}")])
+        rows.append([InlineKeyboardButton("🧹 Відредагувати фото", callback_data=f"regen_image:{news_id}")])
         if row.get("original_media_file_id") and row.get("media_file_id") != row.get("original_media_file_id"):
             rows.append([InlineKeyboardButton("↩️ Повернути оригінальне фото", callback_data=f"restore_image:{news_id}")])
     rows.extend([
@@ -213,6 +213,20 @@ def _clean_editor_text(text_html: str) -> str:
     return text_html
 
 
+async def _download_original_photo(context: ContextTypes.DEFAULT_TYPE, row: dict) -> bytes:
+    """Always download the ORIGINAL Telegram photo for cleanup.
+
+    Never use a previously AI-edited image as the next input, otherwise edits drift
+    farther away from the source on every click.
+    """
+    file_id = row.get("original_media_file_id") or row.get("media_file_id")
+    if not file_id:
+        raise RuntimeError("Original photo file_id is missing")
+    tg_file = await context.bot.get_file(file_id)
+    data = await tg_file.download_as_bytearray()
+    return bytes(data)
+
+
 async def _animate_image_generation(context: ContextTypes.DEFAULT_TYPE, message, news_id: int) -> None:
     frames = ["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰", "▱▰▰▰▰", "▱▱▰▰▰", "▱▱▱▰▰", "▱▱▱▱▰"]
     started = time.monotonic()
@@ -220,20 +234,20 @@ async def _animate_image_generation(context: ContextTypes.DEFAULT_TYPE, message,
     while True:
         elapsed = int(time.monotonic() - started)
         if elapsed < 8:
-            stage = "Аналізую новину та композицію"
-        elif elapsed < 20:
-            stage = "Підбираю тематичний шаблон 4:3"
+            stage = "Перевіряю оригінальне фото"
+        elif elapsed < 18:
+            stage = "Шукаю зайвий текст, рекламу та чужі бренди"
         elif elapsed < 45:
-            stage = "Створюю реалістичний візуал"
+            stage = "Акуратно очищаю тільки зайві елементи"
         else:
-            stage = "Фіналізую світло, тіні та SPORTS NEWS"
+            stage = "Відновлюю фон без зміни самого фото"
         frame = frames[step % len(frames)]
         try:
             await message.edit_text(
-                f"🎨 <b>Генерую фото #{news_id}</b>\n\n"
+                f"🧹 <b>Редагую фото #{news_id}</b>\n\n"
                 f"<code>{frame}</code>  {stage}\n"
                 f"⏱ Минуло: <b>{elapsed} с</b>\n\n"
-                "Не натискай кнопку повторно — готове фото з’явиться тут автоматично.",
+                "Оригінал не перегенеровую — змінюються тільки зайві накладення.",
                 parse_mode="HTML",
             )
             await context.bot.send_chat_action(chat_id=settings.admin_user_id, action=ChatAction.UPLOAD_PHOTO)
@@ -263,12 +277,7 @@ async def handle_editor_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     old_ai = row.get("rewritten_text") or ""
-    await save_editorial_feedback(
-        int(news_id),
-        row.get("original_text") or "",
-        old_ai,
-        corrected,
-    )
+    await save_editorial_feedback(int(news_id), row.get("original_text") or "", old_ai, corrected)
     await update_news(int(news_id), rewritten_text=corrected, status="ready")
     context.user_data.pop("editing_news_id", None)
     row = await get_news(int(news_id))
@@ -307,10 +316,11 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "ℹ️ <b>Логіка SPORTS NEWS</b>\n\n"
             "• У бот приходять тільки готові пости.\n"
-            "• ✏️ Редагувати текст — ти надсилаєш свій виправлений варіант, а система зберігає його як редакторський приклад.\n"
-            "• Наступні AI-рерайти враховують останні ручні правки стилю.\n"
+            "• ✏️ Редагувати текст — ручна правка стає прикладом стилю.\n"
             "• Реальні цитати оформлюються через Telegram blockquote.\n"
-            "• Фото можна перегенерувати, відео лишається оригінальним.",
+            "• 🧹 Відредагувати фото — працює тільки з оригіналом: прибирає зайвий текст/рекламу/чужі бренди, не створює іншу фотографію.\n"
+            "• Якщо фото чисте, воно має залишитися без змін.\n"
+            "• Відео завжди лишається оригінальним.",
             parse_mode="HTML",
             reply_markup=main_menu(),
         )
@@ -332,7 +342,6 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✏️ <b>Редагування поста #{news_id}</b>\n\n"
                 "Надішли наступним повідомленням повністю готовий варіант тексту <b>без фінального SPORTS NEWS</b>.\n"
                 "Можеш використовувати Telegram bold, italic і цитату — форматування збережеться.\n\n"
-                "Після відправки я заміню текст і запам'ятаю твою правку як приклад стилю.\n\n"
                 f"<b>Поточний варіант:</b>\n\n{post_html(row.get('rewritten_text') or '')}",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="cancel_edit")]]),
@@ -365,7 +374,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await show_item(q, news_id)
             except Exception as exc:
                 await q.edit_message_text(
-                    f"🔴 <b>Не вдалося перегенерувати</b>\n\n<code>{html.escape(type(exc).__name__)}</code>",
+                    f"🔴 <b>Не вдалося підготувати інший варіант</b>\n\n<code>{html.escape(type(exc).__name__)}</code>",
                     parse_mode="HTML",
                     reply_markup=item_menu(row),
                 )
@@ -373,24 +382,31 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         news_id = int(data.split(":", 1)[1])
         row = await get_news(news_id)
         if row and row.get("media_type") == "photo":
-            await q.answer("Запустив генерацію 🎨")
+            await q.answer("Редагую оригінал 🧹")
             progress = await context.bot.send_message(
                 settings.admin_user_id,
-                f"🎨 <b>Генерую фото #{news_id}</b>\n\n<code>▰▱▱▱▱</code>  Запускаю генерацію…",
+                f"🧹 <b>Редагую фото #{news_id}</b>\n\n<code>▰▱▱▱▱</code>  Завантажую оригінал…",
                 parse_mode="HTML",
             )
             animation_task = asyncio.create_task(_animate_image_generation(context, progress, news_id))
             try:
-                image_bytes = await generate_news_image(row.get("rewritten_text") or row.get("original_text") or "")
+                # CRITICAL: pass the actual ORIGINAL Telegram image to the editor.
+                # Previously this call omitted source_image, so the API generated a completely new picture.
+                source_bytes = await _download_original_photo(context, row)
+                image_bytes = await generate_news_image(
+                    row.get("rewritten_text") or row.get("original_text") or "",
+                    source_image=source_bytes,
+                )
                 animation_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await animation_task
+
                 buf = BytesIO(image_bytes)
-                buf.name = f"sports_news_{news_id}.jpg"
+                buf.name = f"sports_news_clean_{news_id}.jpg"
                 sent = await context.bot.send_photo(
                     settings.admin_user_id,
                     photo=buf,
-                    caption=f"✅ <b>Фото #{news_id} готове</b>\nМожеш залишити його або перегенерувати ще раз.",
+                    caption=f"✅ <b>Фото #{news_id} відредаговано</b>\nЗайві накладення прибрано. Якщо оригінал був чистим — він лишається без змін.",
                     parse_mode="HTML",
                 )
                 file_id = sent.photo[-1].file_id
@@ -399,7 +415,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with suppress(Exception):
                     await progress.delete()
                 await q.edit_message_text(
-                    f"✅ <b>Фото оновлено для поста #{news_id}</b>\n\nТепер при публікації використається цей варіант.",
+                    f"✅ <b>Фото оновлено для поста #{news_id}</b>\n\nПри публікації використається відредагований варіант.",
                     parse_mode="HTML",
                     reply_markup=item_menu(row),
                 )
@@ -409,7 +425,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await animation_task
                 with suppress(Exception):
                     await progress.edit_text(
-                        f"🔴 <b>Не вдалося згенерувати фото #{news_id}</b>\n\n<code>{html.escape(type(exc).__name__)}</code>\nСпробуй ще раз.",
+                        f"🔴 <b>Не вдалося відредагувати фото #{news_id}</b>\n\n<code>{html.escape(type(exc).__name__)}</code>\nОригінал не змінено.",
                         parse_mode="HTML",
                     )
     elif data.startswith("restore_image:"):
@@ -434,7 +450,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_admin_bot() -> Application:
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    app = Application.builder().token(settings.telegram_bot_token).concurrent_updates(8).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
