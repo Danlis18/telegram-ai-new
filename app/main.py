@@ -144,52 +144,35 @@ def action_buttons(news_id: int, media_type: str | None = None) -> InlineKeyboar
 
 async def capture_media(event, news_id: int) -> str | None:
     message = getattr(event, "message", event)
-    if getattr(message, "photo", None):
-        media_type = "photo"
-        suffix = ".jpg"
-    elif getattr(message, "video", None):
-        media_type = "video"
-        suffix = ".mp4"
-    else:
+    if not getattr(message, "photo", None):
         return None
 
     path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             path = tmp.name
         downloaded = await message.download_media(file=path)
         if not downloaded:
             return None
 
-        if media_type == "photo":
-            with open(path, "rb") as fh:
-                sent = await publisher.send_photo(
-                    settings.admin_user_id,
-                    photo=fh,
-                    caption="🖼 <b>Оригінальне фото з джерела</b>",
-                    parse_mode="HTML",
-                )
-            file_id = sent.photo[-1].file_id
-        else:
-            with open(path, "rb") as fh:
-                sent = await publisher.send_video(
-                    settings.admin_user_id,
-                    video=fh,
-                    caption="🎥 <b>Оригінальне відео з джерела</b>\nВідео не змінюється.",
-                    parse_mode="HTML",
-                    supports_streaming=True,
-                )
-            file_id = sent.video.file_id
+        with open(path, "rb") as fh:
+            sent = await publisher.send_photo(
+                settings.admin_user_id,
+                photo=fh,
+                caption="🖼 <b>Оригінальне фото з джерела</b>",
+                parse_mode="HTML",
+            )
+        file_id = sent.photo[-1].file_id
 
         await update_news(
             news_id,
-            media_type=media_type,
+            media_type="photo",
             media_file_id=file_id,
             original_media_file_id=file_id,
         )
-        return media_type
+        return "photo"
     except Exception:
-        log.exception("Failed to capture media for news_id=%s", news_id)
+        log.exception("Failed to capture photo for news_id=%s", news_id)
         return None
     finally:
         if path:
@@ -203,8 +186,13 @@ async def process_message(event, source: str, *, backfill: bool = False, push_re
     if (await get_setting("processing_paused", "false")) == "true":
         return
 
+    message = getattr(event, "message", event)
+    if not getattr(message, "photo", None):
+        log.info("Skipped @%s #%s: no photo", source, event.id)
+        return
+
     text = (event.raw_text or "").strip()
-    stored_original = text or f"[MEDIA_ONLY] @{source} #{event.id}"
+    stored_original = text or f"[PHOTO_ONLY] @{source} #{event.id}"
     if await seen(stored_original):
         log.info("Skipped @%s #%s: exact duplicate", source, event.id)
         return
@@ -237,9 +225,12 @@ async def process_message(event, source: str, *, backfill: bool = False, push_re
         if status != "ready":
             return
 
-        media_type = None
         if push_ready:
             media_type = await capture_media(event, news_id)
+            if media_type != "photo":
+                await update_news(news_id, status="skipped")
+                log.info("Skipped ready post @%s #%s: photo capture failed", source, event.id)
+                return
             await notify_admin(
                 f"✅ <b>Готовий пост #{news_id}</b>\n"
                 f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>\n\n"
@@ -268,7 +259,9 @@ async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
             for message in reversed(messages):
                 if not message.date or message.date < cutoff:
                     continue
-                stored_original = (message.raw_text or "").strip() or f"[MEDIA_ONLY] @{source} #{message.id}"
+                if not getattr(message, "photo", None):
+                    continue
+                stored_original = (message.raw_text or "").strip() or f"[PHOTO_ONLY] @{source} #{message.id}"
                 if await seen(stored_original):
                     continue
                 await process_message(message, source, backfill=True, push_ready=False)
@@ -279,7 +272,7 @@ async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
             break
         except Exception:
             log.exception("Backfill failed for @%s", source)
-    log.info("Backfill complete: processed_candidates=%d", processed)
+    log.info("Backfill complete: processed_photo_candidates=%d", processed)
     return processed
 
 
@@ -296,7 +289,7 @@ async def main():
             f"Reader: <b>ONLINE</b>\n"
             f"Активні джерела: <b>{len(ACTIVE_SOURCE_IDS)}/{len(SOURCES)}</b>\n"
             f"Недоступних: <b>{len(missing)}</b>\n\n"
-            "У чат приходять тільки готові пости. Оригінальне фото показується одразу; відео не змінюється."
+            "У роботу беруться тільки пости з фото. Повідомлення без фото одразу пропускаються."
         )
         asyncio.create_task(backfill_recent())
         await reader.run_until_disconnected()
