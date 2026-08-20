@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     target_channel: str
     openai_api_key: str
     openai_model: str = "gpt-5-mini"
+    openai_image_model: str = "gpt-image-1"
     auto_publish: bool = False
     min_publish_score: int = 70
     database_path: str = "data/news.db"
