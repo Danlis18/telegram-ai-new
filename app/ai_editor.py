@@ -16,53 +16,23 @@ URL_RE = re.compile(r"(?i)(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)")
 AD_TAG_RE = re.compile(r"(?i)(#реклама|#промо|#promo|#advertising|#ad\b)")
 
 SYSTEM_PROMPT = """Ти редактор українського спортивного Telegram-каналу SPORTS NEWS.
+Пиши самостійний, живий Telegram-пост українською тільки з фактів джерела.
 
-Твоя задача — не механічно перефразувати джерело, а написати самостійний, живий і природний Telegram-пост українською на основі перевірених фактів із вхідного тексту.
+СТРУКТУРА:
+1. Почни з одного доречного emoji та одного короткого речення-хука приблизно до 100 символів. Увесь хук: <b>...</b>.
+2. Після порожнього рядка дай 1-3 короткі природні абзаци приблизно в обсязі джерела. Доречно використай ще одне emoji після одного з абзаців. Можна стримано виділити 1-3 ключові слова через <b> або <i>.
+3. Якщо джерело містить реальну пряму мову, заяву, коментар або дослівну цитату людини — найважливішу цитату оформлюй нативним Telegram HTML: <blockquote>...</blockquote>. Не роби blockquote зі звичайного переказу. Не вигадуй і не розширюй цитати.
+4. SPORTS NEWS в кінці не додавай — це робить код.
 
-ОБОВ'ЯЗКОВА СТРУКТУРА:
-1) ХУК — перший абзац.
-- Починай з ОДНОГО доречного emoji.
-- Після emoji — одне відносно коротке речення, яке передає головну суть і чіпляє увагу.
-- Речення має комфортно поміщатися приблизно в 1-2 рядки Telegram; орієнтир — до ~100 символів, якщо зміст дозволяє.
-- Увесь перший рядок/речення роби жирним через Telegram HTML: <b>...</b>.
-- Не роби клікбейт заради клікбейту: хук має бути природним і фактичним.
+СТИЛЬ:
+Жива сучасна українська, спортивна й природна. Без AI-канцеляризмів, води, довгих розділювачів, декоративного сміття і штучного клікбейту. Варіюй ритм і подачу. Не перевантажуй bold/italic/emoji.
 
-2) ТІЛО НОВИНИ.
-- Після хука — порожній рядок.
-- Далі 1-3 короткі абзаци залежно від обсягу та важливості новини.
-- Орієнтуйся приблизно на інформаційний обсяг оригіналу: коротку новину не роздувай, важливу не обрізай до одного рядка.
-- Після одного з абзаців доречно використай ще ОДНЕ emoji як природний акцент. Не став його механічно в однаковому місці в кожному пості.
-- Можеш інколи виділити 1-3 ключові слова через <b>...</b> або <i>...</i>, якщо це реально покращує читання.
-- Якщо в джерелі є сильна коротка цитата — можеш природно використати її або винести в окремий короткий абзац. Не вигадуй цитат.
+МОДЕРАЦІЯ:
+Не вигадуй фактів, цитат, рахунків, дат, сум чи причин. Видаляй рекламу, CTA, промокоди, згадки джерела і BetKing/Беткінг. Не вставляй зовнішні посилання. Сумнівне або рекламне: publish=false.
 
-3) ФІНАЛ.
-- Не додавай підпис SPORTS NEWS самостійно — його додасть код автоматично.
-
-СТИЛЬ І ВІЗУАЛЬНИЙ РИТМ:
-- Пиши так, ніби пост підготував живий спортивний редактор, а не AI.
-- Дозволено мислити абстрактно у подачі: змінюй ритм, формулювання, спосіб входу в новину та акценти залежно від контексту.
-- Форматування має бути стриманим: зазвичай 1 основне bold-виділення в хуку + максимум 1 додатковий короткий акцент у тілі.
-- Не перетворюй текст на набір жирного, курсиву, emoji та декоративних символів.
-- Не використовуй довгі лінії, підкреслення, розділювачі типу _____, =====, —— або декоративні блоки.
-- Не роби шаблонні заголовки на кшталт «BREAKING», «ТЕРМІНОВО» чи «ОФІЦІЙНО», якщо це прямо не випливає з новини.
-- Emoji мають відповідати змісту. Не використовуй однаковий emoji в кожному пості.
-- Мова — природна сучасна українська, спортивна, впевнена, без канцеляризмів і зайвої води.
-
-ФАКТИ ТА МОДЕРАЦІЯ:
-- Не копіюй формулювання джерела дослівно.
-- Не вигадуй фактів, цитат, рахунків, дат, сум, причин або деталей.
-- Видаляй рекламу, промокоди, CTA, згадки про канал-джерело та будь-які згадки BetKing/Беткінг.
-- Не вставляй зовнішні посилання.
-- Якщо новина сумнівна, недостатньо підтверджена або виглядає рекламною — publish=false.
-- Зазвичай тримай готовий текст приблизно в межах 250-900 символів, але зміст важливіший за механічний ліміт.
-
-ВАЖЛИВО ПРО ФОРМАТ:
-- Поле text повинно містити Telegram HTML (<b>, <i>) там, де потрібне форматування.
-- Не використовуй Markdown **, __ або _ для оформлення.
-- Використовуй тільки прості теги <b>...</b> та <i>...</i>.
-
-Поверни тільки JSON:
-{"publish":bool,"score":0-100,"text":"...","reason":"..."}
+ФОРМАТ:
+Поле text може містити тільки Telegram HTML <b>, <i>, <blockquote>. Не використовуй Markdown.
+Поверни тільки JSON: {"publish":bool,"score":0-100,"text":"...","reason":"..."}
 """
 
 
@@ -76,11 +46,9 @@ def sanitize_source_text(text: str) -> str:
 def is_advertising_post(text: str) -> tuple[bool, str]:
     if AD_TAG_RE.search(text):
         return True, "advertising hashtag"
-
     stripped = sanitize_source_text(text)
     if URL_RE.search(stripped):
         return True, "external link"
-
     return False, ""
 
 
@@ -101,69 +69,64 @@ async def rewrite_news(text: str, source: str) -> dict:
     return result
 
 
+def _to_four_three(image_bytes: bytes) -> bytes:
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    target_ratio = 4 / 3
+    ratio = image.width / image.height
+    if ratio > target_ratio:
+        new_w = int(image.height * target_ratio)
+        left = (image.width - new_w) // 2
+        image = image.crop((left, 0, left + new_w, image.height))
+    elif ratio < target_ratio:
+        new_h = int(image.width / target_ratio)
+        top = (image.height - new_h) // 2
+        image = image.crop((0, top, image.width, top + new_h))
+    image = image.resize((1200, 900), Image.Resampling.LANCZOS)
+    out = BytesIO()
+    image.save(out, format="JPEG", quality=94, optimize=True)
+    return out.getvalue()
+
+
 def _add_sports_news_brand(image_bytes: bytes) -> bytes:
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     width, height = image.size
     draw = ImageDraw.Draw(image, "RGBA")
-
-    band_h = max(72, int(height * 0.085))
-    y0 = height - band_h
-    draw.rectangle((0, y0, width, height), fill=(8, 10, 14, 210))
-    draw.rectangle((0, y0, max(8, int(width * 0.012)), height), fill=(255, 255, 255, 235))
-
+    # Small premium brand plate in a safe corner; visible but never covering the subject/headline.
+    plate_w, plate_h = int(width * 0.22), int(height * 0.105)
+    x0, y0 = int(width * 0.035), int(height * 0.84)
+    draw.rounded_rectangle((x0, y0, x0 + plate_w, y0 + plate_h), radius=12, fill=(5, 7, 10, 205), outline=(214, 170, 45, 180), width=2)
     try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", max(26, int(height * 0.035)))
-        small = ImageFont.truetype("DejaVuSans.ttf", max(14, int(height * 0.018)))
+        big = ImageFont.truetype("DejaVuSans-Bold.ttf", int(height * 0.045))
+        small = ImageFont.truetype("DejaVuSans-Bold.ttf", int(height * 0.018))
     except OSError:
-        font = ImageFont.load_default()
-        small = ImageFont.load_default()
-
-    x = max(28, int(width * 0.035))
-    y = y0 + max(14, int(band_h * 0.18))
-    draw.text((x, y), "SPORTS NEWS", font=font, fill=(255, 255, 255, 255))
-    draw.text((x, y + max(31, int(height * 0.038))), "sports_news_ua", font=small, fill=(205, 210, 220, 255))
-
-    out = BytesIO()
-    image.save(out, format="PNG", optimize=True)
+        big = ImageFont.load_default(); small = ImageFont.load_default()
+    draw.text((x0 + 16, y0 + 8), "SN", font=big, fill=(226, 183, 54, 255))
+    draw.text((x0 + 82, y0 + 25), "SPORTS NEWS", font=small, fill=(250, 250, 248, 255))
+    out = BytesIO(); image.save(out, format="JPEG", quality=94, optimize=True)
     return out.getvalue()
 
 
-async def generate_news_image(
-    news_text: str,
-    *,
-    source_image: bytes | None = None,
-    template_key: str = DEFAULT_IMAGE_TEMPLATE,
-) -> bytes:
-    template = get_template(template_key)
+async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
+    selected_key, template = get_template(template_key, news_text)
     common = (
-        "Create a premium SPORTS NEWS editorial visual based on the news context and the selected layout direction. "
-        "The final image must be square 1:1, minimal, modern, polished and suitable for a serious Ukrainian sports Telegram channel. "
-        "ABSOLUTELY REMOVE or avoid every sponsor logo, betting brand, watermark, media logo, source-channel logo and unrelated brand mark. "
-        "Do not generate readable headlines, fake scores, fake stats, fake quotes, numbers, team crests or sponsor marks. "
-        "Keep the real athlete/coach recognizable when a reference image is provided, but recompose the visual into an original branded editorial layout. "
-        "Use clean negative space, controlled contrast, subtle texture, no visual clutter. "
-        f"Template direction: {template['prompt']} "
-        f"News context: {news_text[:1800]}"
+        "Create a photorealistic premium Ukrainian football/sports news editorial card. "
+        "Use a LANDSCAPE 4:3 composition. This belongs to one consistent SPORTS NEWS visual system: deep charcoal/black base, restrained metallic-gold accents, crisp white typography zones, cinematic stadium/editorial lighting, realistic contact shadows, rim light, depth, subtle grain and believable photographic texture. "
+        "It must look human art-directed, not AI-generated: realistic anatomy, face, hands, jersey fabric, hair, skin, perspective and shadows; no plastic skin, surreal geometry, fake details or excessive glow. "
+        "Keep the family resemblance of the six approved templates, but vary crop, subject position, diagonals, background depth and accent placement so consecutive cards are not clones. "
+        f"Selected thematic template: {selected_key}. {template['prompt']} "
+        "SPORTS NEWS branding must be clearly recognizable as an SN + SPORTS NEWS lockup, integrated into a safe corner or clean negative-space area. It should be noticeable but secondary to the news, never cover a face, player, score or headline. "
+        "Avoid/remove all betting brands, sponsor marks, source-channel logos, watermarks and unrelated media branding. Do not invent team crests, sponsor logos, scores, statistics or quotes. "
+        "If a reference/source photo is supplied, preserve the real person's identity and photographic realism and redesign/recompose that photo into this template instead of inventing a different person. "
+        "Keep any generated headline extremely short and only when confidently supported by the supplied news; otherwise reserve clean headline space rather than hallucinating text. "
+        f"News context: {re.sub(r'<[^>]+>', ' ', news_text)[:1800]}"
     )
-
     if source_image:
-        image_file = BytesIO(source_image)
-        image_file.name = "source.png"
-        result = await client.images.edit(
-            model=settings.openai_image_model,
-            image=image_file,
-            prompt=common,
-            size="1024x1024",
-        )
+        image_file = BytesIO(source_image); image_file.name = "source.png"
+        result = await client.images.edit(model=settings.openai_image_model, image=image_file, prompt=common, size="1536x1024")
     else:
-        result = await client.images.generate(
-            model=settings.openai_image_model,
-            prompt=common,
-            size="1024x1024",
-        )
-
+        result = await client.images.generate(model=settings.openai_image_model, prompt=common, size="1536x1024")
     item = result.data[0]
     if getattr(item, "b64_json", None):
         raw = base64.b64decode(item.b64_json)
-        return _add_sports_news_brand(raw)
+        return _add_sports_news_brand(_to_four_three(raw))
     raise RuntimeError("Image API did not return image bytes")
