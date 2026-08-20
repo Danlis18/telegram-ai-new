@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import os
 from pathlib import Path
 
 from telethon import TelegramClient as TelethonClient, events
@@ -16,13 +17,30 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("telegram-ai-news")
 
 
-def build_reader():
+def get_session_file_b64() -> str | None:
     if settings.telegram_session_file_b64:
+        return settings.telegram_session_file_b64
+
+    chunks = []
+    index = 1
+    while True:
+        value = os.getenv(f"TELEGRAM_SESSION_FILE_B64_{index}")
+        if not value:
+            break
+        chunks.append(value.strip())
+        index += 1
+
+    return "".join(chunks) if chunks else None
+
+
+def build_reader():
+    session_b64 = get_session_file_b64()
+    if session_b64:
         from opentele2.tl import TelegramClient as DesktopTelegramClient
 
         session_path = Path(settings.session_file_path)
         session_path.parent.mkdir(parents=True, exist_ok=True)
-        session_path.write_bytes(base64.b64decode(settings.telegram_session_file_b64))
+        session_path.write_bytes(base64.b64decode(session_b64))
         return DesktopTelegramClient(str(session_path))
 
     if settings.telegram_session and settings.telegram_api_id and settings.telegram_api_hash:
@@ -33,7 +51,7 @@ def build_reader():
         )
 
     raise RuntimeError(
-        "Telegram reader is not configured. Set TELEGRAM_SESSION_FILE_B64 for migrated tdata, "
+        "Telegram reader is not configured. Set TELEGRAM_SESSION_FILE_B64, numbered TELEGRAM_SESSION_FILE_B64_1..N chunks, "
         "or TELEGRAM_SESSION + TELEGRAM_API_ID + TELEGRAM_API_HASH."
     )
 
