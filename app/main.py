@@ -8,9 +8,10 @@ from telethon import TelegramClient as TelethonClient, events
 from telethon.sessions import StringSession
 from telegram import Bot
 
+from app.admin_bot import start_admin_bot, stop_admin_bot
 from app.ai_editor import rewrite_news
 from app.config import settings
-from app.database import init_db, save, seen
+from app.database import get_setting, init_db, save, seen
 from app.sources import SOURCES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -62,6 +63,9 @@ publisher = Bot(settings.telegram_bot_token)
 
 @reader.on(events.NewMessage(chats=SOURCES))
 async def on_news(event):
+    if (await get_setting("processing_paused", "false")) == "true":
+        return
+
     text = (event.raw_text or "").strip()
     if len(text) < 25 or await seen(text):
         return
@@ -89,10 +93,19 @@ async def on_news(event):
 
 async def main():
     await init_db()
-    await reader.start()
-    me = await reader.get_me()
-    log.info("Reader authorized as %s; watching %d sources; auto_publish=%s", me.id, len(SOURCES), settings.auto_publish)
-    await reader.run_until_disconnected()
+    admin_app = await start_admin_bot()
+    try:
+        await reader.start()
+        me = await reader.get_me()
+        log.info(
+            "Reader authorized as %s; watching %d sources; auto_publish=%s; admin_bot=online",
+            me.id,
+            len(SOURCES),
+            settings.auto_publish,
+        )
+        await reader.run_until_disconnected()
+    finally:
+        await stop_admin_bot(admin_app)
 
 
 if __name__ == "__main__":
