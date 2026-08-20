@@ -10,16 +10,22 @@ from opentele2.td import TDesktop
 from opentele2.api import UseCurrentSession
 
 
-async def convert(zip_path: Path, output: Path) -> None:
+async def convert(source: Path, output: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        with zipfile.ZipFile(zip_path, "r") as archive:
-            archive.extractall(tmp_path)
 
-        candidates = [tmp_path / "tdata"] + list(tmp_path.rglob("tdata"))
-        tdata_path = next((p for p in candidates if p.is_dir()), None)
-        if not tdata_path:
-            raise RuntimeError("tdata folder not found in archive")
+        if source.is_dir():
+            tdata_path = source
+        else:
+            with zipfile.ZipFile(source, "r") as archive:
+                archive.extractall(tmp_path)
+            candidates = [tmp_path / "tdata"] + list(tmp_path.rglob("tdata"))
+            tdata_path = next((p for p in candidates if p.is_dir()), None)
+            if not tdata_path:
+                raise RuntimeError("tdata folder not found in archive")
+
+        if not (tdata_path / "key_datas").exists():
+            raise RuntimeError("Selected folder does not look like Telegram Desktop tdata")
 
         tdesk = TDesktop(str(tdata_path))
         if not tdesk.isLoaded():
@@ -42,11 +48,11 @@ async def convert(zip_path: Path, output: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert Telegram Desktop tdata.zip to a Railway-safe Telethon session secret")
-    parser.add_argument("zip", type=Path, help="Path to tdata.zip")
+    parser = argparse.ArgumentParser(description="Convert Telegram Desktop tdata folder or tdata.zip to a Railway-safe Telethon session secret")
+    parser.add_argument("source", type=Path, help="Path to Telegram Desktop tdata folder or tdata.zip")
     parser.add_argument("--output", type=Path, default=Path("telegram_reader.session"))
     args = parser.parse_args()
-    asyncio.run(convert(args.zip, args.output))
+    asyncio.run(convert(args.source, args.output))
 
 
 if __name__ == "__main__":
