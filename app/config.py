@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     min_publish_score: int = 70
     database_path: str = "data/news.db"
     session_file_path: str = "data/telegram_reader.session"
+    admin_user_id: int | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
