@@ -3,6 +3,7 @@ import base64
 import html
 import logging
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,9 +15,10 @@ from telethon.utils import get_peer_id
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.admin_bot import start_admin_bot, stop_admin_bot
-from app.ai_editor import rewrite_news
+from app.ai_editor import is_advertising_post, rewrite_news
 from app.config import settings
 from app.database import get_setting, init_db, save, seen, set_setting, update_news
+from app.formatting import post_html
 from app.sources import SOURCES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -123,17 +125,78 @@ async def sync_sources() -> tuple[int, list[str]]:
     return joined_now, missing
 
 
-def action_buttons(news_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Опублікувати", callback_data=f"publish:{news_id}"),
-            InlineKeyboardButton("🔄 Інший варіант", callback_data=f"regen:{news_id}"),
-        ],
+def action_buttons(news_id: int, media_type: str | None = None) -> InlineKeyboardMarkup:
+    rows = [[
+        InlineKeyboardButton("✅ Опублікувати", callback_data=f"publish:{news_id}"),
+        InlineKeyboardButton("✍️ Інший текст", callback_data=f"regen:{news_id}"),
+    ]]
+    if media_type == "photo":
+        rows.append([InlineKeyboardButton("🖼 Перегенерувати фото", callback_data=f"regen_image:{news_id}")])
+    rows.extend([
         [
             InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}"),
             InlineKeyboardButton("⏭ Пропустити", callback_data=f"skip:{news_id}"),
         ],
+        [InlineKeyboardButton("📋 Готові пости", callback_data="queue")],
     ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def capture_media(event, news_id: int) -> str | None:
+    message = getattr(event, "message", event)
+    if getattr(message, "photo", None):
+        media_type = "photo"
+        suffix = ".jpg"
+    elif getattr(message, "video", None):
+        media_type = "video"
+        suffix = ".mp4"
+    else:
+        return None
+
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            path = tmp.name
+        downloaded = await message.download_media(file=path)
+        if not downloaded:
+            return None
+
+        if media_type == "photo":
+            with open(path, "rb") as fh:
+                sent = await publisher.send_photo(
+                    settings.admin_user_id,
+                    photo=fh,
+                    caption="🖼 <b>Оригінальне фото з джерела</b>",
+                    parse_mode="HTML",
+                )
+            file_id = sent.photo[-1].file_id
+        else:
+            with open(path, "rb") as fh:
+                sent = await publisher.send_video(
+                    settings.admin_user_id,
+                    video=fh,
+                    caption="🎥 <b>Оригінальне відео з джерела</b>\nВідео не змінюється.",
+                    parse_mode="HTML",
+                    supports_streaming=True,
+                )
+            file_id = sent.video.file_id
+
+        await update_news(
+            news_id,
+            media_type=media_type,
+            media_file_id=file_id,
+            original_media_file_id=file_id,
+        )
+        return media_type
+    except Exception:
+        log.exception("Failed to capture media for news_id=%s", news_id)
+        return None
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 async def process_message(event, source: str, *, backfill: bool = False, push_ready: bool = True) -> None:
@@ -142,20 +205,23 @@ async def process_message(event, source: str, *, backfill: bool = False, push_re
 
     text = (event.raw_text or "").strip()
     stored_original = text or f"[MEDIA_ONLY] @{source} #{event.id}"
-
     if await seen(stored_original):
         log.info("Skipped @%s #%s: exact duplicate", source, event.id)
         return
 
-    # Keep all captured material in the database, but do not push raw/rejected posts to admin.
-    initial_status = "raw" if len(text) < 25 else "received"
-    news_id = await save(source, event.id, stored_original, "", 0, initial_status)
-    if not news_id:
+    if len(text) < 25:
+        await save(source, event.id, stored_original, "", 0, "raw")
+        log.info("Skipped @%s #%s: no/short caption", source, event.id)
         return
 
-    log.info("Captured @%s #%s news_id=%s chars=%d backfill=%s", source, event.id, news_id, len(text), backfill)
+    advertising, ad_reason = is_advertising_post(text)
+    if advertising:
+        await save(source, event.id, stored_original, "", 0, "advertising")
+        log.info("Filtered advertising @%s #%s: %s", source, event.id, ad_reason)
+        return
 
-    if len(text) < 25:
+    news_id = await save(source, event.id, stored_original, "", 0, "received")
+    if not news_id:
         return
 
     try:
@@ -165,22 +231,20 @@ async def process_message(event, source: str, *, backfill: bool = False, push_re
         reason = (result.get("reason") or "").strip()
         publishable = bool(result.get("publish")) and score >= settings.min_publish_score and bool(rewritten)
         status = "ready" if publishable else "rejected"
-
-        if publishable and settings.auto_publish:
-            await publisher.send_message(settings.target_channel, rewritten, disable_web_page_preview=True)
-            status = "published"
-
         await update_news(news_id, rewritten_text=rewritten, score=score, status=status)
         log.info("Processed @%s #%s score=%s status=%s news_id=%s reason=%s", source, event.id, score, status, news_id, reason[:200])
 
-        # Only fully moderated, publication-ready variants are pushed to admin.
-        if status == "ready" and push_ready:
-            preview = html.escape(rewritten[:2600])
+        if status != "ready":
+            return
+
+        media_type = None
+        if push_ready:
+            media_type = await capture_media(event, news_id)
             await notify_admin(
                 f"✅ <b>Готовий пост #{news_id}</b>\n"
                 f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>\n\n"
-                f"{preview}",
-                action_buttons(news_id),
+                f"{post_html(rewritten)}",
+                action_buttons(news_id, media_type),
             )
     except Exception:
         await update_news(news_id, status="ai_error")
@@ -207,7 +271,6 @@ async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
                 stored_original = (message.raw_text or "").strip() or f"[MEDIA_ONLY] @{source} #{message.id}"
                 if await seen(stored_original):
                     continue
-                # Backfill fills the queue silently; it must not spam the admin chat on deploy.
                 await process_message(message, source, backfill=True, push_ready=False)
                 processed += 1
             await asyncio.sleep(0.12)
@@ -229,11 +292,11 @@ async def main():
         joined_now, missing = await sync_sources()
         log.info("Reader authorized as %s; active sources=%d/%d; auto_publish=%s; admin_bot=online", me.id, len(ACTIVE_SOURCE_IDS), len(SOURCES), settings.auto_publish)
         await notify_admin(
-            "🟢 <b>AI NEWS CONTROL запущено</b>\n\n"
+            "🟢 <b>SPORTS NEWS CONTROL</b>\n\n"
             f"Reader: <b>ONLINE</b>\n"
             f"Активні джерела: <b>{len(ACTIVE_SOURCE_IDS)}/{len(SOURCES)}</b>\n"
-            f"Автопублікація: <b>{'ON' if settings.auto_publish else 'OFF'}</b>\n\n"
-            "У чат приходитимуть тільки готові пости, які пройшли AI-модерацію."
+            f"Недоступних: <b>{len(missing)}</b>\n\n"
+            "У чат приходять тільки готові пости. Оригінальне фото показується одразу; відео не змінюється."
         )
         asyncio.create_task(backfill_recent())
         await reader.run_until_disconnected()
