@@ -159,26 +159,59 @@ def _to_four_three(image_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
-async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
-    """Edit the source image instead of redesigning it.
+def _image_data_url(image_bytes: bytes) -> str:
+    try:
+        fmt = (Image.open(BytesIO(image_bytes)).format or "JPEG").lower()
+    except Exception:
+        fmt = "jpeg"
+    if fmt == "jpg":
+        fmt = "jpeg"
+    return f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
-    With a source image, the task is deliberately conservative: remove text,
-    watermarks, channel marks, bookmaker/casino branding and other promotional
-    graphics while preserving the original photo, people, composition and colors.
-    """
+
+async def _source_needs_cleanup(source_image: bytes) -> bool:
+    """Cheap vision gate: clean photos bypass the image-generation API entirely."""
+    response = await client.responses.create(
+        model=settings.openai_model,
+        input=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        "Inspect this sports image only to decide whether it needs CLEANUP. "
+                        "Return exactly CLEAN or EDIT. EDIT only if there is clearly visible overlaid editorial/promotional content that should be removed: headline/caption text, score graphics, quote blocks, watermarks, channel/media logos, bookmaker/casino branding, advertising badges or CTA overlays. "
+                        "Do NOT count normal real-world details as removable overlays: player shirt/kit manufacturer marks, club crests, competition patches, stadium signs that naturally belong to the photographed scene, jersey numbers, tattoos, or ordinary objects. "
+                        "If it is already an ordinary clean sports photograph with no unwanted overlay, return CLEAN. When uncertain, return CLEAN so the original is not altered."
+                    ),
+                },
+                {"type": "input_image", "image_url": _image_data_url(source_image)},
+            ],
+        }],
+    )
+    verdict = response.output_text.strip().upper()
+    return verdict.startswith("EDIT")
+
+
+async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
+    """Keep clean source images byte-for-byte unchanged; edit only when cleanup is required."""
     clean_context = re.sub(r"<[^>]+>", " ", news_text)[:1200]
 
     if source_image:
+        # Critical rule: do not spend an image-generation call and do not touch the
+        # pixels if there is nothing unwanted to remove.
+        if not await _source_needs_cleanup(source_image):
+            return source_image
+
         prompt = (
-            "EDIT THIS EXACT SOURCE IMAGE CONSERVATIVELY. Do not redesign, restyle, regenerate or create a new sports poster. "
-            "Preserve the original people, their identity, face, body, pose, clothing, scene, camera angle, crop, lighting, shadows, background, depth of field and natural colors as closely as possible. "
-            "Your ONLY task is visual cleanup: remove ALL overlaid text, headlines, captions, scores, numbers used as graphics, quote blocks, watermarks, channel names, channel logos, media logos, bookmaker/casino/betting branding, sponsor advertising marks, promotional badges, CTA elements and decorative branded overlays. "
-            "Where something is removed, reconstruct the underlying background naturally so the edit is invisible. "
-            "Do not add SPORTS NEWS, SN, any new logo, any new text, any frame, arrows, gold graphics, templates or editorial decorations. "
-            "Do not change a real person's face or identity. Do not invent another player. Do not alter the event or turn the image into AI art. "
-            "Keep authentic photographic color: natural skin tones, real uniform colors, realistic grass/stadium/background colors, neutral white balance and believable contrast. "
-            "The final result should look like the same original clean sports photograph before any graphic design was placed on top of it. "
-            f"News context is only for understanding the subject; never render it as text: {clean_context}"
+            "THIS IS A SURGICAL CLEANUP OF THE PROVIDED IMAGE, NOT A REGENERATION. "
+            "Keep the source image visually identical everywhere except the unwanted OVERLAID graphics that must be removed. "
+            "Remove only clearly overlaid headline/caption text, score graphics, quote blocks, watermarks, channel/media logos, bookmaker/casino branding, advertising badges and CTA overlays. "
+            "DO NOT remove or alter authentic parts of the photographed scene: the person's face, hair, body, pose, clothing, jersey design, club crest, kit manufacturer logo, competition patch, jersey number, tattoos, stadium, crowd, field, natural signage, lighting, shadows, crop, camera angle, depth of field or colors. "
+            "Do not redesign, restyle, beautify, recolor, relight, sharpen, add a template, replace the person, change clothing, invent a background, or add any new text/logo. "
+            "After removing an unwanted overlay, inpaint ONLY that removed area from the surrounding original pixels so it looks naturally empty. "
+            "No SPORTS NEWS branding is added during cleanup. Preserve original composition and photographic realism. "
+            f"Context only, never render it: {clean_context}"
         )
         image_file = BytesIO(source_image)
         image_file.name = "source.png"
@@ -188,22 +221,26 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
             prompt=prompt,
             size="1536x1024",
         )
-    else:
-        selected_key, template = get_template(template_key, news_text)
-        prompt = (
-            "Create a clean photorealistic sports editorial photograph, landscape 4:3. "
-            "No text, no logos, no watermarks, no branding, no bookmaker/casino marks, no graphic poster layout. "
-            "Use natural saturated photographic colors, realistic skin, anatomy, clothing, lighting and shadows. "
-            "Avoid AI-art appearance and excessive effects. "
-            f"Composition reference: {selected_key}. {template['prompt']} "
-            f"News context: {clean_context}"
-        )
-        result = await client.images.generate(
-            model=settings.openai_image_model,
-            prompt=prompt,
-            size="1536x1024",
-        )
+        item = result.data[0]
+        if getattr(item, "b64_json", None):
+            return base64.b64decode(item.b64_json)
+        raise RuntimeError("Image API did not return image bytes")
 
+    # Fallback only when a post genuinely has no source image.
+    selected_key, template = get_template(template_key, news_text)
+    prompt = (
+        "Create a clean photorealistic sports editorial photograph, landscape 4:3. "
+        "No text, no logos, no watermarks, no branding, no bookmaker/casino marks, no graphic poster layout. "
+        "Use natural saturated photographic colors, realistic skin, anatomy, clothing, lighting and shadows. "
+        "Avoid AI-art appearance and excessive effects. "
+        f"Composition reference: {selected_key}. {template['prompt']} "
+        f"News context: {clean_context}"
+    )
+    result = await client.images.generate(
+        model=settings.openai_image_model,
+        prompt=prompt,
+        size="1536x1024",
+    )
     item = result.data[0]
     if getattr(item, "b64_json", None):
         raw = base64.b64decode(item.b64_json)
