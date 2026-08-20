@@ -217,6 +217,15 @@ def _add_sports_news_logo(image_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+def _effective_image_model() -> str:
+    configured = (settings.openai_image_model or "").strip()
+    # gpt-image-1 is now legacy/deprecated. Keep Railway configuration compatible,
+    # but transparently use the current editing model when the old default is still set.
+    if not configured or configured == "gpt-image-1":
+        return "gpt-image-2"
+    return configured
+
+
 async def _source_needs_cleanup(source_image: bytes) -> bool:
     try:
         response = await client.responses.create(
@@ -227,21 +236,30 @@ async def _source_needs_cleanup(source_image: bytes) -> bool:
                     {
                         "type": "input_text",
                         "text": (
-                            "Inspect this sports image. Return exactly CLEAN or EDIT. "
-                            "EDIT ONLY when there is a clearly visible FOREIGN overlaid brand/logo/watermark that should be removed: another Telegram/media channel logo or name, bookmaker logo, casino logo, betting partner mark, commercial promotional watermark, or unrelated media watermark. "
-                            "DO NOT mark EDIT merely because the image contains normal editorial text. Preserve headlines, captions, quotes, scores, dates, player names, match information, lists, numbers, arrows, graphic shapes and useful sports design. "
-                            "Also preserve club/team crests, league/tournament logos, national federation marks, jersey numbers, kit manufacturer marks, sponsors physically printed on the real player's clothing, stadium signs, tattoos and all natural scene details. "
-                            "If no foreign overlaid branding exists, return CLEAN. When uncertain, return CLEAN."
+                            "Inspect this sports image and answer with exactly one word: CLEAN or EDIT. "
+                            "Return EDIT if there is ANY added/overlaid graphic content that is not part of the natural photographed scene and should be removed before reposting. "
+                            "That includes ALL overlaid headlines, captions, quotes, scores, dates, player names, lists, numbers, arrows, graphic labels, channel names, media logos, watermarks, bookmaker/casino/betting marks, sponsor blocks, promo badges and other added text or branding. "
+                            "Return CLEAN only for a normal clean sports photograph with no added text, no added graphic labels, no watermarks and no foreign overlaid branding. "
+                            "Do NOT treat natural physical details as overlays: keep club/team crests printed on the kit, jersey numbers, kit manufacturer marks, sponsors physically printed on clothing, tattoos, stadium signs and other details that genuinely exist in the photographed scene. "
+                            "If you are uncertain whether something is an overlay, return EDIT."
                         ),
                     },
                     {"type": "input_image", "image_url": _image_data_url(source_image)},
                 ],
             }],
         )
-        return response.output_text.strip().upper().startswith("EDIT")
-    except Exception:
-        log.exception("Cleanup classifier failed; preserving original image")
-        return False
+        verdict = response.output_text.strip().upper()
+        log.info("Image cleanup classifier verdict=%s", verdict[:80])
+        if verdict.startswith("EDIT"):
+            return True
+        if verdict.startswith("CLEAN"):
+            return False
+        raise RuntimeError(f"CLEANUP_CLASSIFIER_BAD_RESPONSE: {verdict[:200]}")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        log.exception("Cleanup classifier failed")
+        raise RuntimeError(f"CLEANUP_CLASSIFIER_FAILED: {type(exc).__name__}: {exc}") from exc
 
 
 async def _image_result_bytes(item) -> bytes | None:
@@ -249,17 +267,17 @@ async def _image_result_bytes(item) -> bytes | None:
     if b64:
         try:
             return base64.b64decode(b64)
-        except Exception:
-            log.exception("Could not decode image b64 response")
+        except Exception as exc:
+            raise RuntimeError(f"IMAGE_RESULT_B64_DECODE_FAILED: {type(exc).__name__}: {exc}") from exc
     url = getattr(item, "url", None)
     if url:
         try:
-            async with httpx.AsyncClient(timeout=60) as http:
+            async with httpx.AsyncClient(timeout=90) as http:
                 response = await http.get(url)
                 response.raise_for_status()
                 return response.content
-        except Exception:
-            log.exception("Could not download image result URL")
+        except Exception as exc:
+            raise RuntimeError(f"IMAGE_RESULT_DOWNLOAD_FAILED: {type(exc).__name__}: {exc}") from exc
     return None
 
 
@@ -275,55 +293,72 @@ def _restore_source_dimensions(edited_bytes: bytes, source_image: bytes) -> byte
 
 async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
     clean_context = re.sub(r"<[^>]+>", " ", news_text)[:1000]
+    image_model = _effective_image_model()
 
     if source_image:
         source_image = _normalize_to_jpeg(source_image, "SOURCE_IMAGE")
-        working = source_image
+        needs_cleanup = await _source_needs_cleanup(source_image)
+        log.info("Image edit path: needs_cleanup=%s model=%s", needs_cleanup, image_model)
 
-        if await _source_needs_cleanup(source_image):
-            try:
-                image_file = BytesIO(source_image)
-                image_file.name = "source.jpg"
-                result = await client.images.edit(
-                    model=settings.openai_image_model,
-                    image=image_file,
-                    prompt=(
-                        "SURGICAL EDIT OF THIS EXACT SOURCE IMAGE. Do NOT regenerate, redesign, restyle, recolor, relight, recompose or replace anything. "
-                        "REMOVE ONLY foreign overlaid brands/logos/watermarks: other Telegram/media channel branding, bookmaker/casino/betting branding, unrelated commercial promotional logos or watermarks. "
-                        "KEEP EVERY OTHER PIXEL/CONTENT AS CLOSE TO THE SOURCE AS POSSIBLE. KEEP useful existing editorial text exactly visible and complete. "
-                        "KEEP sports identity elements: club/team crests, league/tournament/federation logos, kit manufacturer marks, jersey numbers and sponsors that are physically part of clothing or the stadium scene. "
-                        "KEEP the same person, face, body, pose, clothing, crop, camera angle, background, colors, lighting, shadows and composition. "
-                        "Do not add any new text or branding. Only inpaint the small areas where removable foreign branding existed. "
-                        f"Context only: {clean_context}"
-                    ),
-                )
-                if result.data:
-                    edited_bytes = await _image_result_bytes(result.data[0])
-                    if edited_bytes:
-                        try:
-                            working = _restore_source_dimensions(edited_bytes, source_image)
-                        except Exception:
-                            log.exception("Edited image was invalid; preserving original")
-            except Exception:
-                log.exception("Image edit API failed; preserving original")
-                working = source_image
+        if not needs_cleanup:
+            # Clean photo: do not run generative editing. Only add our exact brand asset.
+            return _add_sports_news_logo(source_image)
+
+        image_file = BytesIO(source_image)
+        image_file.name = "source.jpg"
+        try:
+            result = await client.images.edit(
+                model=image_model,
+                image=image_file,
+                prompt=(
+                    "EDIT THIS EXACT SOURCE IMAGE; DO NOT CREATE A NEW SCENE. "
+                    "Remove ALL added/overlaid text and graphic overlays from the image: headlines, captions, quote blocks, scores, dates, player names, lists, numbers, arrows, graphic labels, media/channel names, watermarks, bookmaker/casino/betting branding, sponsor/promo blocks and any other overlaid logos or promotional graphics. "
+                    "Reconstruct only the small areas hidden behind those overlays so they naturally match the surrounding original background. "
+                    "Preserve the underlying sports photograph as faithfully as possible: same real person, face, expression, body, pose, clothing, crop, camera angle, stadium/background, colors, lighting, shadows and photographic texture. "
+                    "Do not redesign, restyle, recolor, relight, beautify, sharpen, change anatomy or invent a different person. "
+                    "Keep natural physical details that are genuinely part of the photographed scene, including club crests and jersey details printed on clothing, tattoos and real stadium elements. "
+                    "Do not add any new text or branding. The final result must look like the clean original photograph before any poster text or graphic overlay was added. "
+                    f"News context is for identification only and must NOT be rendered as text: {clean_context}"
+                ),
+            )
+        except Exception as exc:
+            log.exception("Image edit API failed model=%s", image_model)
+            raise RuntimeError(f"IMAGE_EDIT_API_FAILED[{image_model}]: {type(exc).__name__}: {exc}") from exc
+
+        if not result.data:
+            raise RuntimeError(f"IMAGE_EDIT_EMPTY_RESULT[{image_model}]")
+
+        edited_bytes = await _image_result_bytes(result.data[0])
+        if not edited_bytes:
+            raise RuntimeError(f"IMAGE_EDIT_RESULT_HAS_NO_IMAGE[{image_model}]")
+
+        try:
+            working = _restore_source_dimensions(edited_bytes, source_image)
+        except Exception as exc:
+            log.exception("Edited image validation failed")
+            raise RuntimeError(f"IMAGE_EDIT_INVALID_RESULT: {type(exc).__name__}: {exc}") from exc
 
         return _add_sports_news_logo(working)
 
     selected_key, template = get_template(template_key, news_text)
-    result = await client.images.generate(
-        model=settings.openai_image_model,
-        prompt=(
-            "Create a clean photorealistic sports editorial photograph. "
-            "No foreign media/channel/bookmaker/casino branding. No artificial text. "
-            "Natural saturated colors, realistic skin, anatomy, clothing, lighting and shadows. "
-            f"Composition reference: {selected_key}. {template['prompt']} "
-            f"News context: {clean_context}"
-        ),
-        size="1536x1024",
-    )
+    try:
+        result = await client.images.generate(
+            model=image_model,
+            prompt=(
+                "Create a clean photorealistic sports editorial photograph. "
+                "No foreign media/channel/bookmaker/casino branding. No artificial text. "
+                "Natural saturated colors, realistic skin, anatomy, clothing, lighting and shadows. "
+                f"Composition reference: {selected_key}. {template['prompt']} "
+                f"News context: {clean_context}"
+            ),
+            size="1536x1024",
+        )
+    except Exception as exc:
+        log.exception("Image generation API failed model=%s", image_model)
+        raise RuntimeError(f"IMAGE_GENERATE_API_FAILED[{image_model}]: {type(exc).__name__}: {exc}") from exc
+
     if result.data:
         generated = await _image_result_bytes(result.data[0])
         if generated:
             return _add_sports_news_logo(_to_four_three(generated))
-    raise RuntimeError("IMAGE_API_EMPTY_RESULT")
+    raise RuntimeError(f"IMAGE_API_EMPTY_RESULT[{image_model}]")
