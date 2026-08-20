@@ -27,12 +27,17 @@ SYSTEM_PROMPT = """Ти редактор українського спортив
 - Не став emoji у першому абзаці.
 
 2. Другий абзац — перший змістовний абзац тіла новини.
+- ВІН НЕ МАЄ ПОВТОРЮВАТИ ЗАГОЛОВОК іншими словами.
+- Якщо хук уже повідомив факт «хто + що сталося», другий абзац повинен одразу додати НОВУ інформацію: деталі, умови, контекст, причину, наслідок, рахунок, суперника, суму, цитату або інший факт із джерела.
+- Заборонено робити пару типу: «NAVІ вилетіли з EWC!» → «NAVI та MongolZ вибули з EWC». Це дубль, а не розвиток новини.
+- Основна частина повинна РОЗКРИВАТИ хук, а не переказувати його.
 - Саме тут, якщо це природно, можна використати ОДИН доречний emoji.
 - Emoji став тільки в кінці повного речення.
 - Не став emoji всередині речення, після окремого слова, після двокрапки, у середині цитати або одразу після закриття цитати.
 - Якщо emoji не пасує — не став його взагалі.
 
 3. Далі — ще 0-2 короткі абзаци залежно від обсягу джерела. Не роздувай коротку новину і не обрізай важливу.
+- Кожен наступний абзац має додавати новий зміст, а не повторювати попередній.
 - Додаткові emoji зазвичай не потрібні.
 - Можна стримано виділити 1-3 ключові слова через <b> або <i>, якщо це реально допомагає читанню.
 
@@ -42,6 +47,11 @@ SYSTEM_PROMPT = """Ти редактор українського спортив
 - Emoji не став у кінці blockquote.
 
 5. SPORTS NEWS в кінці не додавай — це робить код.
+
+ГОЛОВНЕ РЕДАКТОРСЬКЕ ПРАВИЛО:
+Хук = коротко повідомляє головну подію.
+Тіло = відповідає «що саме сталося далі / які деталі / чому це важливо».
+Якщо в джерелі недостатньо фактів для нормального тіла, краще зроби коротший пост з одним змістовним абзацом, ніж повторюй заголовок.
 
 СТИЛЬ:
 Жива сучасна українська, спортивна й природна. Без AI-канцеляризмів, води, довгих розділювачів, декоративного сміття і штучного клікбейту. Варіюй ритм та конструкції, щоб пости не виглядали шаблонними. Форматування стримане і функціональне.
@@ -85,21 +95,54 @@ def _feedback_context(examples: list[dict]) -> str:
     return "\n".join(chunks)
 
 
-async def rewrite_news(text: str, source: str) -> dict:
-    clean_text = sanitize_source_text(text)
-    examples = await get_style_examples(6)
+def _plain(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = re.sub(r"[^\wа-яіїєґА-ЯІЇЄҐ']+", " ", text, flags=re.UNICODE)
+    return " ".join(text.lower().split())
+
+
+def _headline_body_overlap(text: str) -> float:
+    parts = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    if len(parts) < 2:
+        return 0.0
+    headline_words = {w for w in _plain(parts[0]).split() if len(w) > 2}
+    body_words = {w for w in _plain(parts[1]).split() if len(w) > 2}
+    if not headline_words or not body_words:
+        return 0.0
+    return len(headline_words & body_words) / max(1, min(len(headline_words), len(body_words)))
+
+
+async def _request_rewrite(clean_text: str, source: str, examples: list[dict], extra_instruction: str = "") -> dict:
     response = await client.responses.create(
         model=settings.openai_model,
         input=[
-            {"role": "system", "content": SYSTEM_PROMPT + _feedback_context(examples)},
+            {"role": "system", "content": SYSTEM_PROMPT + _feedback_context(examples) + extra_instruction},
             {"role": "user", "content": f"Джерело: @{source}\n\nНовина:\n{clean_text}"},
         ],
     )
     raw = response.output_text.strip()
     if raw.startswith("```"):
         raw = raw.strip("`").removeprefix("json").strip()
-    result = json.loads(raw)
+    return json.loads(raw)
+
+
+async def rewrite_news(text: str, source: str) -> dict:
+    clean_text = sanitize_source_text(text)
+    examples = await get_style_examples(6)
+    result = await _request_rewrite(clean_text, source, examples)
     result["text"] = sanitize_source_text((result.get("text") or "").strip())
+
+    # One automatic editorial retry if the hook and first body paragraph substantially repeat each other.
+    if result.get("publish") and _headline_body_overlap(result["text"]) >= 0.62:
+        retry_note = (
+            "\n\nВАЖЛИВА ПОВТОРНА ПРАВКА: попередній варіант повторив зміст хука у другому абзаці. "
+            "Перепиши пост так, щоб другий абзац одразу давав нову деталь із джерела. "
+            "Не повторюй ті самі команди/гравців/подію тим самим формулюванням без додаткового факту."
+        )
+        retry = await _request_rewrite(clean_text, source, examples, retry_note)
+        retry["text"] = sanitize_source_text((retry.get("text") or "").strip())
+        result = retry
+
     return result
 
 
