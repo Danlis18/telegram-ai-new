@@ -4,6 +4,13 @@ import aiosqlite
 from app.config import settings
 
 
+async def _ensure_column(db, name: str, definition: str) -> None:
+    cur = await db.execute("PRAGMA table_info(news)")
+    columns = {row[1] for row in await cur.fetchall()}
+    if name not in columns:
+        await db.execute(f"ALTER TABLE news ADD COLUMN {name} {definition}")
+
+
 async def init_db():
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(settings.database_path) as db:
@@ -18,6 +25,9 @@ async def init_db():
             status TEXT DEFAULT 'received',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )""")
+        await _ensure_column(db, "media_type", "TEXT")
+        await _ensure_column(db, "media_file_id", "TEXT")
+        await _ensure_column(db, "original_media_file_id", "TEXT")
         await db.execute("""CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -77,7 +87,9 @@ async def get_news(news_id: int):
 
 
 async def update_news(news_id: int, **fields) -> None:
-    allowed = {"rewritten_text", "score", "status"}
+    allowed = {
+        "rewritten_text", "score", "status", "media_type", "media_file_id", "original_media_file_id"
+    }
     items = [(k, v) for k, v in fields.items() if k in allowed]
     if not items:
         return
@@ -92,16 +104,6 @@ async def get_queue(limit: int = 20):
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM news WHERE status='ready' ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
-        return [dict(r) for r in await cur.fetchall()]
-
-
-async def get_archive(limit: int = 20):
-    async with aiosqlite.connect(settings.database_path) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT * FROM news WHERE status IN ('published','skipped','rejected','ai_error','raw') ORDER BY id DESC LIMIT ?",
             (limit,),
         )
         return [dict(r) for r in await cur.fetchall()]
@@ -127,6 +129,7 @@ async def stats():
             "received": "status='received'",
             "ai_error": "status='ai_error'",
             "raw": "status='raw'",
+            "advertising": "status='advertising'",
         }.items():
             cur = await db.execute(f"SELECT COUNT(*) FROM news WHERE {where}")
             result[key] = (await cur.fetchone())[0]
