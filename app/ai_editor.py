@@ -5,11 +5,13 @@ from io import BytesIO
 from pathlib import Path
 
 from openai import AsyncOpenAI
-from PIL import Image
+from PIL import Image, ImageFile, UnidentifiedImageError
 
 from app.config import settings
 from app.database import get_style_examples
 from app.image_templates import DEFAULT_IMAGE_TEMPLATE, get_template
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 client = AsyncOpenAI(api_key=settings.openai_api_key)
 
@@ -144,8 +146,26 @@ async def rewrite_news(text: str, source: str) -> dict:
     return result
 
 
+def _open_image_bytes(image_bytes: bytes, label: str) -> Image.Image:
+    if not image_bytes:
+        raise RuntimeError(f"{label}_EMPTY")
+    try:
+        image = Image.open(BytesIO(image_bytes))
+        image.load()
+        return image
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise RuntimeError(f"{label}_INVALID_IMAGE: {type(exc).__name__}: {exc}") from exc
+
+
+def _normalize_to_jpeg(image_bytes: bytes, label: str) -> bytes:
+    image = _open_image_bytes(image_bytes, label).convert("RGB")
+    out = BytesIO()
+    image.save(out, format="JPEG", quality=97, optimize=True)
+    return out.getvalue()
+
+
 def _to_four_three(image_bytes: bytes) -> bytes:
-    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    image = _open_image_bytes(image_bytes, "GENERATED_IMAGE").convert("RGB")
     target_ratio = 4 / 3
     ratio = image.width / image.height
     if ratio > target_ratio:
@@ -163,22 +183,26 @@ def _to_four_three(image_bytes: bytes) -> bytes:
 
 
 def _image_data_url(image_bytes: bytes) -> str:
+    normalized = _normalize_to_jpeg(image_bytes, "SOURCE_IMAGE")
+    return f"data:image/jpeg;base64,{base64.b64encode(normalized).decode('ascii')}"
+
+
+def _load_logo() -> Image.Image:
+    if not LOGO_PATH.exists():
+        raise RuntimeError(f"SPORTS_NEWS_LOGO_MISSING: {LOGO_PATH}")
     try:
-        fmt = (Image.open(BytesIO(image_bytes)).format or "JPEG").lower()
-    except Exception:
-        fmt = "jpeg"
-    if fmt == "jpg":
-        fmt = "jpeg"
-    return f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        logo = Image.open(LOGO_PATH)
+        logo.load()
+        return logo.convert("RGBA")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise RuntimeError(f"SPORTS_NEWS_LOGO_INVALID: {type(exc).__name__}: {exc}") from exc
 
 
 def _add_sports_news_logo(image_bytes: bytes) -> bytes:
-    """Overlay the approved SPORTS NEWS asset exactly, without redrawing it."""
-    image = Image.open(BytesIO(image_bytes)).convert("RGBA")
-    if not LOGO_PATH.exists():
-        raise RuntimeError(f"SPORTS NEWS logo asset missing: {LOGO_PATH}")
+    """Overlay the exact approved SPORTS NEWS asset; never redraw it with AI/PIL text."""
+    image = _open_image_bytes(image_bytes, "WORKING_IMAGE").convert("RGBA")
+    logo = _load_logo()
 
-    logo = Image.open(LOGO_PATH).convert("RGBA")
     width, height = image.size
     base = min(width, height)
     target_w = max(88, int(base * 0.145))
@@ -220,8 +244,8 @@ async def _source_needs_cleanup(source_image: bytes) -> bool:
 
 
 def _restore_source_dimensions(edited_bytes: bytes, source_image: bytes) -> bytes:
-    source = Image.open(BytesIO(source_image))
-    edited = Image.open(BytesIO(edited_bytes)).convert("RGB")
+    source = _open_image_bytes(source_image, "SOURCE_IMAGE")
+    edited = _open_image_bytes(edited_bytes, "EDITED_IMAGE").convert("RGB")
     if edited.size != source.size:
         edited = edited.resize(source.size, Image.Resampling.LANCZOS)
     out = BytesIO()
@@ -230,11 +254,15 @@ def _restore_source_dimensions(edited_bytes: bytes, source_image: bytes) -> byte
 
 
 async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
-    """Preserve original image; remove only foreign branding; add exact approved SPORTS NEWS logo."""
+    """Edit the exact Telegram source when needed, otherwise preserve it; then add the approved logo."""
     clean_context = re.sub(r"<[^>]+>", " ", news_text)[:1000]
 
     if source_image:
+        # Normalize Telegram bytes once. This prevents MIME/extension mismatches and
+        # truncated-image issues from reaching the OpenAI image endpoint.
+        source_image = _normalize_to_jpeg(source_image, "SOURCE_IMAGE")
         working = source_image
+
         if await _source_needs_cleanup(source_image):
             prompt = (
                 "SURGICAL EDIT OF THIS EXACT SOURCE IMAGE. Do NOT regenerate, redesign, restyle, recolor, relight, recompose or replace anything. "
@@ -246,7 +274,7 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
                 f"Context only: {clean_context}"
             )
             image_file = BytesIO(source_image)
-            image_file.name = "source.png"
+            image_file.name = "source.jpg"
             result = await client.images.edit(
                 model=settings.openai_image_model,
                 image=image_file,
@@ -254,8 +282,14 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
             )
             item = result.data[0]
             if not getattr(item, "b64_json", None):
-                raise RuntimeError("Image API did not return image bytes")
-            working = _restore_source_dimensions(base64.b64decode(item.b64_json), source_image)
+                raise RuntimeError("IMAGE_API_NO_BYTES")
+            try:
+                edited_bytes = base64.b64decode(item.b64_json, validate=True)
+                working = _restore_source_dimensions(edited_bytes, source_image)
+            except Exception as exc:
+                # Never destroy the workflow because an edit response is malformed.
+                # Fall back to the untouched original and still apply the exact logo.
+                working = source_image
 
         return _add_sports_news_logo(working)
 
@@ -274,5 +308,6 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
     )
     item = result.data[0]
     if getattr(item, "b64_json", None):
-        return _add_sports_news_logo(_to_four_three(base64.b64decode(item.b64_json)))
-    raise RuntimeError("Image API did not return image bytes")
+        generated = base64.b64decode(item.b64_json)
+        return _add_sports_news_logo(_to_four_three(generated))
+    raise RuntimeError("IMAGE_API_NO_BYTES")
