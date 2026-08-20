@@ -1,5 +1,6 @@
 import asyncio
 import html
+import logging
 import re
 import time
 from contextlib import suppress
@@ -24,6 +25,8 @@ from app.database import (
 )
 from app.formatting import post_html
 from app.sources import SOURCES
+
+log = logging.getLogger("telegram-ai-news.admin-bot")
 
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -214,16 +217,13 @@ def _clean_editor_text(text_html: str) -> str:
 
 
 async def _download_original_photo(context: ContextTypes.DEFAULT_TYPE, row: dict) -> bytes:
-    """Always download the ORIGINAL Telegram photo for cleanup.
-
-    Never use a previously AI-edited image as the next input, otherwise edits drift
-    farther away from the source on every click.
-    """
     file_id = row.get("original_media_file_id") or row.get("media_file_id")
     if not file_id:
         raise RuntimeError("Original photo file_id is missing")
     tg_file = await context.bot.get_file(file_id)
     data = await tg_file.download_as_bytearray()
+    if not data:
+        raise RuntimeError("Telegram returned empty original photo")
     return bytes(data)
 
 
@@ -389,14 +389,26 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
             animation_task = asyncio.create_task(_animate_image_generation(context, progress, news_id))
+            stage = "DOWNLOAD_ORIGINAL"
+            source_bytes = None
             try:
-                # CRITICAL: pass the actual ORIGINAL Telegram image to the editor.
-                # Previously this call omitted source_image, so the API generated a completely new picture.
                 source_bytes = await _download_original_photo(context, row)
-                image_bytes = await generate_news_image(
-                    row.get("rewritten_text") or row.get("original_text") or "",
-                    source_image=source_bytes,
-                )
+                stage = "AI_EDIT_AND_POSTPROCESS"
+                try:
+                    image_bytes = await generate_news_image(
+                        row.get("rewritten_text") or row.get("original_text") or "",
+                        source_image=source_bytes,
+                    )
+                except RuntimeError as exc:
+                    message = str(exc)
+                    if "SPORTS_NEWS_LOGO" in message or "WORKING_IMAGE" in message:
+                        log.exception("Post-processing failed for photo #%s; using untouched original", news_id)
+                        image_bytes = source_bytes
+                        stage = "FALLBACK_ORIGINAL_AFTER_POSTPROCESS_ERROR"
+                    else:
+                        raise
+
+                stage = "SEND_TELEGRAM"
                 animation_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await animation_task
@@ -406,16 +418,17 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent = await context.bot.send_photo(
                     settings.admin_user_id,
                     photo=buf,
-                    caption=f"✅ <b>Фото #{news_id} відредаговано</b>\nЗайві накладення прибрано. Якщо оригінал був чистим — він лишається без змін.",
+                    caption=f"✅ <b>Фото #{news_id} відредаговано</b>\nЯкщо очищення або накладання логотипа не вдалося, бот безпечно залишає оригінал.",
                     parse_mode="HTML",
                 )
+                stage = "SAVE_FILE_ID"
                 file_id = sent.photo[-1].file_id
                 await update_news(news_id, media_file_id=file_id)
                 row = await get_news(news_id)
                 with suppress(Exception):
                     await progress.delete()
                 await q.edit_message_text(
-                    f"✅ <b>Фото оновлено для поста #{news_id}</b>\n\nПри публікації використається відредагований варіант.",
+                    f"✅ <b>Фото оновлено для поста #{news_id}</b>\n\nПри публікації використається цей варіант.",
                     parse_mode="HTML",
                     reply_markup=item_menu(row),
                 )
@@ -423,9 +436,16 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 animation_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await animation_task
+                log.exception("Photo edit failed news_id=%s stage=%s", news_id, stage)
+                error_text = str(exc).strip() or "(без тексту помилки)"
+                error_text = error_text[:1200]
                 with suppress(Exception):
                     await progress.edit_text(
-                        f"🔴 <b>Не вдалося відредагувати фото #{news_id}</b>\n\n<code>{html.escape(type(exc).__name__)}</code>\nОригінал не змінено.",
+                        f"🔴 <b>Не вдалося відредагувати фото #{news_id}</b>\n\n"
+                        f"<b>Stage:</b> <code>{html.escape(stage)}</code>\n"
+                        f"<b>Type:</b> <code>{html.escape(type(exc).__name__)}</code>\n"
+                        f"<b>Error:</b> <code>{html.escape(error_text)}</code>\n\n"
+                        "Оригінал не змінено.",
                         parse_mode="HTML",
                     )
     elif data.startswith("restore_image:"):
