@@ -4,7 +4,7 @@ import re
 from io import BytesIO
 
 from openai import AsyncOpenAI
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from app.config import settings
 from app.database import get_style_examples
@@ -169,8 +169,67 @@ def _image_data_url(image_bytes: bytes) -> str:
     return f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
 
+def _font(size: int):
+    try:
+        return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _add_sports_news_logo(image_bytes: bytes) -> bytes:
+    """Add one compact SPORTS NEWS shield in the top-left without touching the rest."""
+    image = Image.open(BytesIO(image_bytes)).convert("RGBA")
+    width, height = image.size
+    base = min(width, height)
+    logo_w = max(92, int(base * 0.16))
+    logo_h = int(logo_w * 0.92)
+    margin = max(14, int(base * 0.025))
+
+    logo = Image.new("RGBA", (logo_w, logo_h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(logo, "RGBA")
+    gold = (224, 177, 45, 255)
+    white = (248, 248, 245, 255)
+    dark = (7, 10, 14, 222)
+
+    shield = [
+        (int(logo_w * 0.08), int(logo_h * 0.08)),
+        (int(logo_w * 0.50), 0),
+        (int(logo_w * 0.92), int(logo_h * 0.08)),
+        (int(logo_w * 0.88), int(logo_h * 0.68)),
+        (int(logo_w * 0.50), int(logo_h * 0.98)),
+        (int(logo_w * 0.12), int(logo_h * 0.68)),
+    ]
+    d.polygon(shield, fill=dark, outline=gold)
+
+    sn_font = _font(int(logo_h * 0.29))
+    sports_font = _font(int(logo_h * 0.105))
+    small_font = _font(int(logo_h * 0.072))
+
+    s_box = d.textbbox((0, 0), "S", font=sn_font)
+    n_box = d.textbbox((0, 0), "N", font=sn_font)
+    sw = s_box[2] - s_box[0]
+    nw = n_box[2] - n_box[0]
+    total = sw + nw - int(logo_w * 0.04)
+    sx = (logo_w - total) // 2
+    sy = int(logo_h * 0.13)
+    d.text((sx, sy), "S", font=sn_font, fill=white)
+    d.text((sx + sw - int(logo_w * 0.04), sy), "N", font=sn_font, fill=gold)
+
+    label = "SPORTS"
+    box = d.textbbox((0, 0), label, font=sports_font)
+    d.text(((logo_w - (box[2] - box[0])) // 2, int(logo_h * 0.51)), label, font=sports_font, fill=white)
+    news = "NEWS"
+    box2 = d.textbbox((0, 0), news, font=small_font)
+    d.text(((logo_w - (box2[2] - box2[0])) // 2, int(logo_h * 0.66)), news, font=small_font, fill=gold)
+
+    image.alpha_composite(logo, (margin, margin))
+    out = BytesIO()
+    image.convert("RGB").save(out, format="JPEG", quality=96, optimize=True)
+    return out.getvalue()
+
+
 async def _source_needs_cleanup(source_image: bytes) -> bool:
-    """Cheap vision gate: clean photos bypass the image-generation API entirely."""
+    """Only foreign branding/logos trigger an expensive image edit."""
     response = await client.responses.create(
         model=settings.openai_model,
         input=[{
@@ -179,60 +238,65 @@ async def _source_needs_cleanup(source_image: bytes) -> bool:
                 {
                     "type": "input_text",
                     "text": (
-                        "Inspect this sports image only to decide whether it needs CLEANUP. "
-                        "Return exactly CLEAN or EDIT. EDIT only if there is clearly visible overlaid editorial/promotional content that should be removed: headline/caption text, score graphics, quote blocks, watermarks, channel/media logos, bookmaker/casino branding, advertising badges or CTA overlays. "
-                        "Do NOT count normal real-world details as removable overlays: player shirt/kit manufacturer marks, club crests, competition patches, stadium signs that naturally belong to the photographed scene, jersey numbers, tattoos, or ordinary objects. "
-                        "If it is already an ordinary clean sports photograph with no unwanted overlay, return CLEAN. When uncertain, return CLEAN so the original is not altered."
+                        "Inspect this sports image. Return exactly CLEAN or EDIT. "
+                        "EDIT ONLY when there is a clearly visible FOREIGN overlaid brand/logo/watermark that should be removed: another Telegram/media channel logo or name, bookmaker logo, casino logo, betting partner mark, commercial promotional watermark, or unrelated media watermark. "
+                        "DO NOT mark EDIT merely because the image contains normal editorial text. Preserve headlines, captions, quotes, scores, dates, player names, match information, lists, numbers, arrows, graphic shapes and useful sports design. "
+                        "Also preserve club/team crests, league/tournament logos, national federation marks, jersey numbers, kit manufacturer marks, sponsors physically printed on the real player's clothing, stadium signs, tattoos and all natural scene details. "
+                        "If no foreign overlaid branding exists, return CLEAN. When uncertain, return CLEAN."
                     ),
                 },
                 {"type": "input_image", "image_url": _image_data_url(source_image)},
             ],
         }],
     )
-    verdict = response.output_text.strip().upper()
-    return verdict.startswith("EDIT")
+    return response.output_text.strip().upper().startswith("EDIT")
+
+
+def _restore_source_dimensions(edited_bytes: bytes, source_image: bytes) -> bytes:
+    source = Image.open(BytesIO(source_image))
+    edited = Image.open(BytesIO(edited_bytes)).convert("RGB")
+    if edited.size != source.size:
+        edited = edited.resize(source.size, Image.Resampling.LANCZOS)
+    out = BytesIO()
+    edited.save(out, format="JPEG", quality=96, optimize=True)
+    return out.getvalue()
 
 
 async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
-    """Keep clean source images byte-for-byte unchanged; edit only when cleanup is required."""
-    clean_context = re.sub(r"<[^>]+>", " ", news_text)[:1200]
+    """Preserve original image; remove only foreign branding; always add SPORTS NEWS logo."""
+    clean_context = re.sub(r"<[^>]+>", " ", news_text)[:1000]
 
     if source_image:
-        # Critical rule: do not spend an image-generation call and do not touch the
-        # pixels if there is nothing unwanted to remove.
-        if not await _source_needs_cleanup(source_image):
-            return source_image
+        working = source_image
+        if await _source_needs_cleanup(source_image):
+            prompt = (
+                "SURGICAL EDIT OF THIS EXACT SOURCE IMAGE. Do NOT regenerate, redesign, restyle, recolor, relight, recompose or replace anything. "
+                "REMOVE ONLY foreign overlaid brands/logos/watermarks: other Telegram/media channel branding, bookmaker/casino/betting branding, unrelated commercial promotional logos or watermarks. "
+                "KEEP EVERY OTHER PIXEL/CONTENT AS CLOSE TO THE SOURCE AS POSSIBLE. In particular KEEP ALL useful existing text exactly visible and complete: headlines, captions, player names, quotes, scores, dates, lists, numbers, match information and graphic layout. "
+                "KEEP sports identity elements: club/team crests, league/tournament/federation logos, kit manufacturer marks, jersey numbers and sponsors that are physically part of the photographed clothing or stadium scene. "
+                "KEEP the same person, face, body, pose, clothing, crop, camera angle, background, colors, lighting, shadows and composition. "
+                "Do not add any new text or branding. Only inpaint the tiny areas where a removable foreign logo/watermark was located. "
+                f"Context only: {clean_context}"
+            )
+            image_file = BytesIO(source_image)
+            image_file.name = "source.png"
+            result = await client.images.edit(
+                model=settings.openai_image_model,
+                image=image_file,
+                prompt=prompt,
+            )
+            item = result.data[0]
+            if not getattr(item, "b64_json", None):
+                raise RuntimeError("Image API did not return image bytes")
+            working = _restore_source_dimensions(base64.b64decode(item.b64_json), source_image)
 
-        prompt = (
-            "THIS IS A SURGICAL CLEANUP OF THE PROVIDED IMAGE, NOT A REGENERATION. "
-            "Keep the source image visually identical everywhere except the unwanted OVERLAID graphics that must be removed. "
-            "Remove only clearly overlaid headline/caption text, score graphics, quote blocks, watermarks, channel/media logos, bookmaker/casino branding, advertising badges and CTA overlays. "
-            "DO NOT remove or alter authentic parts of the photographed scene: the person's face, hair, body, pose, clothing, jersey design, club crest, kit manufacturer logo, competition patch, jersey number, tattoos, stadium, crowd, field, natural signage, lighting, shadows, crop, camera angle, depth of field or colors. "
-            "Do not redesign, restyle, beautify, recolor, relight, sharpen, add a template, replace the person, change clothing, invent a background, or add any new text/logo. "
-            "After removing an unwanted overlay, inpaint ONLY that removed area from the surrounding original pixels so it looks naturally empty. "
-            "No SPORTS NEWS branding is added during cleanup. Preserve original composition and photographic realism. "
-            f"Context only, never render it: {clean_context}"
-        )
-        image_file = BytesIO(source_image)
-        image_file.name = "source.png"
-        result = await client.images.edit(
-            model=settings.openai_image_model,
-            image=image_file,
-            prompt=prompt,
-            size="1536x1024",
-        )
-        item = result.data[0]
-        if getattr(item, "b64_json", None):
-            return base64.b64decode(item.b64_json)
-        raise RuntimeError("Image API did not return image bytes")
+        return _add_sports_news_logo(working)
 
-    # Fallback only when a post genuinely has no source image.
     selected_key, template = get_template(template_key, news_text)
     prompt = (
-        "Create a clean photorealistic sports editorial photograph, landscape 4:3. "
-        "No text, no logos, no watermarks, no branding, no bookmaker/casino marks, no graphic poster layout. "
-        "Use natural saturated photographic colors, realistic skin, anatomy, clothing, lighting and shadows. "
-        "Avoid AI-art appearance and excessive effects. "
+        "Create a clean photorealistic sports editorial photograph. "
+        "No foreign media/channel/bookmaker/casino branding. No artificial text. "
+        "Natural saturated colors, realistic skin, anatomy, clothing, lighting and shadows. "
         f"Composition reference: {selected_key}. {template['prompt']} "
         f"News context: {clean_context}"
     )
@@ -243,6 +307,5 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
     )
     item = result.data[0]
     if getattr(item, "b64_json", None):
-        raw = base64.b64decode(item.b64_json)
-        return _to_four_three(raw)
+        return _add_sports_news_logo(_to_four_three(base64.b64decode(item.b64_json)))
     raise RuntimeError("Image API did not return image bytes")
