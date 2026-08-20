@@ -32,6 +32,14 @@ async def init_db():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS editorial_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            news_id INTEGER,
+            original_text TEXT NOT NULL,
+            ai_text TEXT NOT NULL,
+            corrected_text TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
         await db.commit()
 
 
@@ -97,6 +105,31 @@ async def update_news(news_id: int, **fields) -> None:
     async with aiosqlite.connect(settings.database_path) as db:
         await db.execute(sql, [v for _, v in items] + [news_id])
         await db.commit()
+
+
+async def save_editorial_feedback(news_id: int, original_text: str, ai_text: str, corrected_text: str) -> None:
+    async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute(
+            "INSERT INTO editorial_feedback (news_id,original_text,ai_text,corrected_text) VALUES (?,?,?,?)",
+            (news_id, original_text, ai_text, corrected_text),
+        )
+        await db.commit()
+
+
+async def get_style_examples(limit: int = 6) -> list[dict]:
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT original_text, ai_text, corrected_text FROM editorial_feedback ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_feedback_count() -> int:
+    async with aiosqlite.connect(settings.database_path) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM editorial_feedback")
+        return int((await cur.fetchone())[0])
 
 
 async def get_queue(limit: int = 20):
