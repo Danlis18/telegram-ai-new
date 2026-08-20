@@ -1,8 +1,13 @@
 import base64
 import json
 import re
+from io import BytesIO
+
 from openai import AsyncOpenAI
+from PIL import Image, ImageDraw, ImageFont
+
 from app.config import settings
+from app.image_templates import DEFAULT_IMAGE_TEMPLATE, get_template
 
 client = AsyncOpenAI(api_key=settings.openai_api_key)
 
@@ -31,7 +36,7 @@ SYSTEM_PROMPT = """Ти редактор українського спортив
 - Якщо в джерелі є сильна коротка цитата — можеш природно використати її або винести в окремий короткий абзац. Не вигадуй цитат.
 
 3) ФІНАЛ.
-- Не додавай підпис SPORTS NEWS самостійно — код додасть його автоматично.
+- Не додавай підпис SPORTS NEWS самостійно — його додасть код автоматично.
 
 СТИЛЬ І ВІЗУАЛЬНИЙ РИТМ:
 - Пиши так, ніби пост підготував живий спортивний редактор, а не AI.
@@ -96,19 +101,69 @@ async def rewrite_news(text: str, source: str) -> dict:
     return result
 
 
-async def generate_news_image(news_text: str) -> bytes:
-    prompt = (
-        "Create a premium editorial sports news image for a Ukrainian Telegram sports channel. "
-        "Use the news context below. No logos, no betting brands, no watermarks, no readable text, "
-        "no fake scores or numbers. Clean modern sports-media aesthetic, realistic editorial composition, "
-        "strong subject focus, suitable for a square Telegram post. News context: " + news_text[:1800]
+def _add_sports_news_brand(image_bytes: bytes) -> bytes:
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    width, height = image.size
+    draw = ImageDraw.Draw(image, "RGBA")
+
+    band_h = max(72, int(height * 0.085))
+    y0 = height - band_h
+    draw.rectangle((0, y0, width, height), fill=(8, 10, 14, 210))
+    draw.rectangle((0, y0, max(8, int(width * 0.012)), height), fill=(255, 255, 255, 235))
+
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", max(26, int(height * 0.035)))
+        small = ImageFont.truetype("DejaVuSans.ttf", max(14, int(height * 0.018)))
+    except OSError:
+        font = ImageFont.load_default()
+        small = ImageFont.load_default()
+
+    x = max(28, int(width * 0.035))
+    y = y0 + max(14, int(band_h * 0.18))
+    draw.text((x, y), "SPORTS NEWS", font=font, fill=(255, 255, 255, 255))
+    draw.text((x, y + max(31, int(height * 0.038))), "sports_news_ua", font=small, fill=(205, 210, 220, 255))
+
+    out = BytesIO()
+    image.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+async def generate_news_image(
+    news_text: str,
+    *,
+    source_image: bytes | None = None,
+    template_key: str = DEFAULT_IMAGE_TEMPLATE,
+) -> bytes:
+    template = get_template(template_key)
+    common = (
+        "Create a premium SPORTS NEWS editorial visual based on the news context and the selected layout direction. "
+        "The final image must be square 1:1, minimal, modern, polished and suitable for a serious Ukrainian sports Telegram channel. "
+        "ABSOLUTELY REMOVE or avoid every sponsor logo, betting brand, watermark, media logo, source-channel logo and unrelated brand mark. "
+        "Do not generate readable headlines, fake scores, fake stats, fake quotes, numbers, team crests or sponsor marks. "
+        "Keep the real athlete/coach recognizable when a reference image is provided, but recompose the visual into an original branded editorial layout. "
+        "Use clean negative space, controlled contrast, subtle texture, no visual clutter. "
+        f"Template direction: {template['prompt']} "
+        f"News context: {news_text[:1800]}"
     )
-    result = await client.images.generate(
-        model=settings.openai_image_model,
-        prompt=prompt,
-        size="1024x1024",
-    )
+
+    if source_image:
+        image_file = BytesIO(source_image)
+        image_file.name = "source.png"
+        result = await client.images.edit(
+            model=settings.openai_image_model,
+            image=image_file,
+            prompt=common,
+            size="1024x1024",
+        )
+    else:
+        result = await client.images.generate(
+            model=settings.openai_image_model,
+            prompt=common,
+            size="1024x1024",
+        )
+
     item = result.data[0]
     if getattr(item, "b64_json", None):
-        return base64.b64decode(item.b64_json)
+        raw = base64.b64decode(item.b64_json)
+        return _add_sports_news_brand(raw)
     raise RuntimeError("Image API did not return image bytes")
