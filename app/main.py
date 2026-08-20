@@ -3,6 +3,7 @@ import base64
 import html
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telethon import TelegramClient as TelethonClient, events
@@ -69,6 +70,7 @@ publisher = Bot(settings.telegram_bot_token)
 
 async def notify_admin(text: str, reply_markup=None) -> None:
     if not settings.admin_user_id:
+        log.warning("ADMIN_USER_ID is not configured; admin notification skipped")
         return
     try:
         await publisher.send_message(
@@ -115,7 +117,6 @@ async def sync_sources() -> tuple[int, list[str]]:
             except FloodWaitError as exc:
                 log.warning("Telegram FloodWait while joining @%s: %ss", source, exc.seconds)
                 missing.append(source)
-                # Stop automatic joins for this boot; avoid stressing the Telegram account.
                 break
             except Exception:
                 log.exception("Could not join source @%s", source)
@@ -128,7 +129,6 @@ async def sync_sources() -> tuple[int, list[str]]:
             log.exception("Could not resolve source @%s", source)
             missing.append(source)
 
-    # If joining stopped because of FloodWait, classify remaining unresolved sources as missing.
     resolved_names = {name.lower() for name in ACTIVE_SOURCE_IDS.values()}
     for source in SOURCES:
         if source.lower() not in resolved_names and source not in missing:
@@ -143,12 +143,27 @@ async def sync_sources() -> tuple[int, list[str]]:
     return joined_now, missing
 
 
-@reader.on(events.NewMessage)
-async def on_news(event):
-    source = ACTIVE_SOURCE_IDS.get(event.chat_id)
-    if not source:
-        return
+def action_buttons(news_id: int, status: str) -> InlineKeyboardMarkup:
+    if status == "ready":
+        first = [
+            InlineKeyboardButton("✅ Опублікувати", callback_data=f"publish:{news_id}"),
+            InlineKeyboardButton("🔄 Перегенерувати", callback_data=f"regen:{news_id}"),
+        ]
+    else:
+        first = [
+            InlineKeyboardButton("🔄 Перегенерувати", callback_data=f"regen:{news_id}"),
+            InlineKeyboardButton("⏭ Пропустити", callback_data=f"skip:{news_id}"),
+        ]
+    return InlineKeyboardMarkup([
+        first,
+        [
+            InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}"),
+            InlineKeyboardButton("📰 Черга", callback_data="queue"),
+        ],
+    ])
 
+
+async def process_message(event, source: str, *, backfill: bool = False) -> None:
     if (await get_setting("processing_paused", "false")) == "true":
         return
 
@@ -164,6 +179,7 @@ async def on_news(event):
         result = await rewrite_news(text, source)
         score = int(result.get("score", 0))
         rewritten = (result.get("text") or "").strip()
+        reason = (result.get("reason") or "").strip()
         publishable = bool(result.get("publish")) and score >= settings.min_publish_score and bool(rewritten)
         status = "ready" if publishable else "rejected"
 
@@ -172,27 +188,58 @@ async def on_news(event):
             status = "published"
 
         news_id = await save(source, event.id, text, rewritten, score, status)
-        log.info("@%s #%s score=%s status=%s news_id=%s", source, event.id, score, status, news_id)
+        log.info(
+            "@%s #%s score=%s status=%s news_id=%s backfill=%s reason=%s",
+            source, event.id, score, status, news_id, backfill, reason[:200],
+        )
 
-        if status == "ready" and news_id:
-            preview = html.escape(rewritten[:2200])
-            buttons = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Опублікувати", callback_data=f"publish:{news_id}"),
-                    InlineKeyboardButton("🔄 Перегенерувати", callback_data=f"regen:{news_id}"),
-                ],
-                [
-                    InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}"),
-                    InlineKeyboardButton("⏭ Пропустити", callback_data=f"skip:{news_id}"),
-                ],
-            ])
+        if news_id and status in {"ready", "rejected"}:
+            preview_text = rewritten or text
+            preview = html.escape(preview_text[:2200])
+            badge = "🆕" if status == "ready" else "⚠️"
+            label = "Готова до публікації" if status == "ready" else "AI не пропустив автоматично"
+            reason_html = f"\n📝 Причина: {html.escape(reason[:500])}" if reason else ""
+            backfill_html = "\n🕘 Відновлено після перезапуску" if backfill else ""
             await notify_admin(
-                f"🆕 <b>Нова новина в черзі #{news_id}</b>\n"
-                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>\n\n{preview}",
-                buttons,
+                f"{badge} <b>{label} #{news_id}</b>\n"
+                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>"
+                f"{backfill_html}{reason_html}\n\n{preview}",
+                action_buttons(news_id, status),
             )
     except Exception:
         log.exception("Failed processing @%s #%s", source, event.id)
+
+
+@reader.on(events.NewMessage)
+async def on_news(event):
+    source = ACTIVE_SOURCE_IDS.get(event.chat_id)
+    if not source:
+        return
+    await process_message(event, source)
+
+
+async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
+    """Process a few recent posts so deploys/restarts do not create blind gaps."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    processed = 0
+    for chat_id, source in list(ACTIVE_SOURCE_IDS.items()):
+        try:
+            messages = await reader.get_messages(chat_id, limit=limit_per_source)
+            for message in reversed(messages):
+                if not message.date or message.date < cutoff:
+                    continue
+                if await seen((message.raw_text or "").strip()):
+                    continue
+                await process_message(message, source, backfill=True)
+                processed += 1
+            await asyncio.sleep(0.12)
+        except FloodWaitError as exc:
+            log.warning("FloodWait during backfill @%s: %ss", source, exc.seconds)
+            break
+        except Exception:
+            log.exception("Backfill failed for @%s", source)
+    log.info("Backfill complete: processed_candidates=%d", processed)
+    return processed
 
 
 async def main():
@@ -216,8 +263,9 @@ async def main():
             f"Нових підписок цього запуску: <b>{joined_now}</b>\n"
             f"Недоступних джерел: <b>{len(missing)}</b>\n"
             f"Автопублікація: <b>{'ON' if settings.auto_publish else 'OFF'}</b>\n\n"
-            "Коли AI відбере новину, вона автоматично прийде сюди з кнопками керування."
+            "Тепер бот показує не лише схвалені, а й відхилені AI новини з причиною."
         )
+        asyncio.create_task(backfill_recent())
         await reader.run_until_disconnected()
     finally:
         await stop_admin_bot(admin_app)
