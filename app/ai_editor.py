@@ -2,9 +2,10 @@ import base64
 import json
 import re
 from io import BytesIO
+from pathlib import Path
 
 from openai import AsyncOpenAI
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 from app.config import settings
 from app.database import get_style_examples
@@ -15,6 +16,8 @@ client = AsyncOpenAI(api_key=settings.openai_api_key)
 BETKING_RE = re.compile(r"(?i)(bet\s*king|бет\s*кінг|беткінг)")
 URL_RE = re.compile(r"(?i)(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)")
 AD_TAG_RE = re.compile(r"(?i)(#реклама|#промо|#promo|#advertising|#ad\b)")
+
+LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "sports_news_logo.jpg"
 
 SYSTEM_PROMPT = """Ти редактор українського спортивного Telegram-каналу SPORTS NEWS.
 Пиши самостійний, живий Telegram-пост українською тільки з фактів джерела.
@@ -169,60 +172,24 @@ def _image_data_url(image_bytes: bytes) -> str:
     return f"data:image/{fmt};base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
 
-def _font(size: int):
-    try:
-        return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
-    except OSError:
-        return ImageFont.load_default()
-
-
 def _add_sports_news_logo(image_bytes: bytes) -> bytes:
-    """Add one compact SPORTS NEWS shield in the top-left without touching the rest."""
+    """Overlay the approved SPORTS NEWS asset exactly, without redrawing it."""
     image = Image.open(BytesIO(image_bytes)).convert("RGBA")
+    if not LOGO_PATH.exists():
+        raise RuntimeError(f"SPORTS NEWS logo asset missing: {LOGO_PATH}")
+
+    logo = Image.open(LOGO_PATH).convert("RGBA")
     width, height = image.size
     base = min(width, height)
-    logo_w = max(92, int(base * 0.16))
-    logo_h = int(logo_w * 0.92)
-    margin = max(14, int(base * 0.025))
+    target_w = max(88, int(base * 0.145))
+    scale = target_w / logo.width
+    target_h = max(1, int(logo.height * scale))
+    logo = logo.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
-    logo = Image.new("RGBA", (logo_w, logo_h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(logo, "RGBA")
-    gold = (224, 177, 45, 255)
-    white = (248, 248, 245, 255)
-    dark = (7, 10, 14, 222)
+    margin_x = max(14, int(width * 0.022))
+    margin_y = max(14, int(height * 0.022))
+    image.alpha_composite(logo, (margin_x, margin_y))
 
-    shield = [
-        (int(logo_w * 0.08), int(logo_h * 0.08)),
-        (int(logo_w * 0.50), 0),
-        (int(logo_w * 0.92), int(logo_h * 0.08)),
-        (int(logo_w * 0.88), int(logo_h * 0.68)),
-        (int(logo_w * 0.50), int(logo_h * 0.98)),
-        (int(logo_w * 0.12), int(logo_h * 0.68)),
-    ]
-    d.polygon(shield, fill=dark, outline=gold)
-
-    sn_font = _font(int(logo_h * 0.29))
-    sports_font = _font(int(logo_h * 0.105))
-    small_font = _font(int(logo_h * 0.072))
-
-    s_box = d.textbbox((0, 0), "S", font=sn_font)
-    n_box = d.textbbox((0, 0), "N", font=sn_font)
-    sw = s_box[2] - s_box[0]
-    nw = n_box[2] - n_box[0]
-    total = sw + nw - int(logo_w * 0.04)
-    sx = (logo_w - total) // 2
-    sy = int(logo_h * 0.13)
-    d.text((sx, sy), "S", font=sn_font, fill=white)
-    d.text((sx + sw - int(logo_w * 0.04), sy), "N", font=sn_font, fill=gold)
-
-    label = "SPORTS"
-    box = d.textbbox((0, 0), label, font=sports_font)
-    d.text(((logo_w - (box[2] - box[0])) // 2, int(logo_h * 0.51)), label, font=sports_font, fill=white)
-    news = "NEWS"
-    box2 = d.textbbox((0, 0), news, font=small_font)
-    d.text(((logo_w - (box2[2] - box2[0])) // 2, int(logo_h * 0.66)), news, font=small_font, fill=gold)
-
-    image.alpha_composite(logo, (margin, margin))
     out = BytesIO()
     image.convert("RGB").save(out, format="JPEG", quality=96, optimize=True)
     return out.getvalue()
@@ -263,7 +230,7 @@ def _restore_source_dimensions(edited_bytes: bytes, source_image: bytes) -> byte
 
 
 async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
-    """Preserve original image; remove only foreign branding; always add SPORTS NEWS logo."""
+    """Preserve original image; remove only foreign branding; add exact approved SPORTS NEWS logo."""
     clean_context = re.sub(r"<[^>]+>", " ", news_text)[:1000]
 
     if source_image:
