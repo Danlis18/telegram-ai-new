@@ -1,8 +1,12 @@
+import asyncio
 import html
 import re
+import time
+from contextlib import suppress
 from io import BytesIO
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatAction
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.ai_editor import generate_news_image, rewrite_news
@@ -209,6 +213,38 @@ def _clean_editor_text(text_html: str) -> str:
     return text_html
 
 
+async def _animate_image_generation(context: ContextTypes.DEFAULT_TYPE, message, news_id: int) -> None:
+    frames = ["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰", "▱▰▰▰▰", "▱▱▰▰▰", "▱▱▱▰▰", "▱▱▱▱▰"]
+    started = time.monotonic()
+    step = 0
+    while True:
+        elapsed = int(time.monotonic() - started)
+        if elapsed < 8:
+            stage = "Аналізую новину та композицію"
+        elif elapsed < 20:
+            stage = "Підбираю тематичний шаблон 4:3"
+        elif elapsed < 45:
+            stage = "Створюю реалістичний візуал"
+        else:
+            stage = "Фіналізую світло, тіні та SPORTS NEWS"
+        frame = frames[step % len(frames)]
+        try:
+            await message.edit_text(
+                f"🎨 <b>Генерую фото #{news_id}</b>\n\n"
+                f"<code>{frame}</code>  {stage}\n"
+                f"⏱ Минуло: <b>{elapsed} с</b>\n\n"
+                "Не натискай кнопку повторно — готове фото з’явиться тут автоматично.",
+                parse_mode="HTML",
+            )
+            await context.bot.send_chat_action(chat_id=settings.admin_user_id, action=ChatAction.UPLOAD_PHOTO)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        step += 1
+        await asyncio.sleep(1.4)
+
+
 async def handle_editor_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
@@ -337,22 +373,45 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         news_id = int(data.split(":", 1)[1])
         row = await get_news(news_id)
         if row and row.get("media_type") == "photo":
-            await q.answer("Генерую нове фото…")
+            await q.answer("Запустив генерацію 🎨")
+            progress = await context.bot.send_message(
+                settings.admin_user_id,
+                f"🎨 <b>Генерую фото #{news_id}</b>\n\n<code>▰▱▱▱▱</code>  Запускаю генерацію…",
+                parse_mode="HTML",
+            )
+            animation_task = asyncio.create_task(_animate_image_generation(context, progress, news_id))
             try:
                 image_bytes = await generate_news_image(row.get("rewritten_text") or row.get("original_text") or "")
+                animation_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await animation_task
                 buf = BytesIO(image_bytes)
                 buf.name = f"sports_news_{news_id}.jpg"
-                sent = await context.bot.send_photo(settings.admin_user_id, photo=buf, caption=f"🖼 <b>Новий варіант фото #{news_id}</b>", parse_mode="HTML")
+                sent = await context.bot.send_photo(
+                    settings.admin_user_id,
+                    photo=buf,
+                    caption=f"✅ <b>Фото #{news_id} готове</b>\nМожеш залишити його або перегенерувати ще раз.",
+                    parse_mode="HTML",
+                )
                 file_id = sent.photo[-1].file_id
                 await update_news(news_id, media_file_id=file_id)
                 row = await get_news(news_id)
+                with suppress(Exception):
+                    await progress.delete()
                 await q.edit_message_text(
                     f"✅ <b>Фото оновлено для поста #{news_id}</b>\n\nТепер при публікації використається цей варіант.",
                     parse_mode="HTML",
                     reply_markup=item_menu(row),
                 )
             except Exception as exc:
-                await q.answer(f"Помилка генерації: {type(exc).__name__}", show_alert=True)
+                animation_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await animation_task
+                with suppress(Exception):
+                    await progress.edit_text(
+                        f"🔴 <b>Не вдалося згенерувати фото #{news_id}</b>\n\n<code>{html.escape(type(exc).__name__)}</code>\nСпробуй ще раз.",
+                        parse_mode="HTML",
+                    )
     elif data.startswith("restore_image:"):
         news_id = int(data.split(":", 1)[1])
         row = await get_news(news_id)
