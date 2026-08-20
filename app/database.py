@@ -109,6 +109,16 @@ async def get_queue(limit: int = 20):
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_archive(limit: int = 15):
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM news WHERE status IN ('published','skipped','rejected','ai_error','raw','advertising') ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_recent(limit: int = 12):
     async with aiosqlite.connect(settings.database_path) as db:
         db.row_factory = aiosqlite.Row
