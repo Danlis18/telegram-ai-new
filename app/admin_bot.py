@@ -1,16 +1,19 @@
 import html
+import re
 from io import BytesIO
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.ai_editor import generate_news_image, rewrite_news
 from app.config import settings
 from app.database import (
     get_archive,
+    get_feedback_count,
     get_news,
     get_queue,
     get_setting,
+    save_editorial_feedback,
     set_setting,
     stats,
     update_news,
@@ -33,9 +36,10 @@ def item_menu(row: dict) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("✅ Опублікувати", callback_data=f"publish:{news_id}")],
         [
-            InlineKeyboardButton("✍️ Інший текст", callback_data=f"regen:{news_id}"),
-            InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}"),
+            InlineKeyboardButton("✏️ Редагувати текст", callback_data=f"edit:{news_id}"),
+            InlineKeyboardButton("🔄 Інший варіант", callback_data=f"regen:{news_id}"),
         ],
+        [InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}")],
     ]
     if row.get("media_type") == "photo":
         rows.append([InlineKeyboardButton("🖼 Перегенерувати фото", callback_data=f"regen_image:{news_id}")])
@@ -72,10 +76,11 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
+    context.user_data.pop("editing_news_id", None)
     await update.message.reply_text(
         "🏟 <b>SPORTS NEWS CONTROL</b>\n\n"
         "Сюди приходять тільки готові новини після повної AI-модерації.\n"
-        "Фото показується оригінальне й змінюється лише за твоєю командою. Відео завжди лишається оригінальним.",
+        "Текст можна вручну підправити — кожна твоя правка зберігається як редакторський приклад для наступних AI-постів.",
         parse_mode="HTML",
         reply_markup=main_menu(),
     )
@@ -85,17 +90,15 @@ async def show_queue(query):
     rows = await get_queue(20)
     if not rows:
         await query.edit_message_text(
-            "✅ <b>Готових постів зараз немає</b>\n\n"
-            "Коли новина пройде модерацію, вона автоматично з'явиться тут.",
+            "✅ <b>Готових постів зараз немає</b>\n\nКоли новина пройде модерацію, вона автоматично з'явиться тут.",
             parse_mode="HTML",
             reply_markup=main_menu(),
         )
         return
-
     buttons = []
     for row in rows:
         media = "🖼" if row.get("media_type") == "photo" else "🎥" if row.get("media_type") == "video" else "📝"
-        title = (row.get("rewritten_text") or "Готовий пост").replace("\n", " ")[:46]
+        title = re.sub(r"<[^>]+>", "", row.get("rewritten_text") or "Готовий пост").replace("\n", " ")[:46]
         buttons.append([InlineKeyboardButton(f"{media} {row['score']}% · {title}", callback_data=f"item:{row['id']}")])
     buttons.append([InlineKeyboardButton("🔄 Оновити", callback_data="queue"), InlineKeyboardButton("🏠 Меню", callback_data="menu")])
     await query.edit_message_text(
@@ -125,6 +128,7 @@ async def show_item(query, news_id: int):
 async def show_stats(query):
     s = await stats()
     active = await get_setting("active_sources", str(len(SOURCES)))
+    learned = await get_feedback_count()
     await query.edit_message_text(
         "📊 <b>Статистика</b>\n\n"
         f"📡 Активних джерел: <b>{active}/{len(SOURCES)}</b>\n"
@@ -134,7 +138,8 @@ async def show_stats(query):
         f"🚫 Відхилено AI: <b>{s['rejected']}</b>\n"
         f"🛑 Відсіяно реклами: <b>{s['advertising']}</b>\n"
         f"🔴 AI-помилки: <b>{s['ai_error']}</b>\n"
-        f"🧠 Середній score: <b>{s['avg_score']}%</b>",
+        f"🧠 Середній score: <b>{s['avg_score']}%</b>\n"
+        f"✏️ Редакторських правок: <b>{learned}</b>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Оновити", callback_data="stats"), InlineKeyboardButton("🏠 Меню", callback_data="menu")]]),
     )
@@ -178,9 +183,7 @@ async def show_sources(query):
     missing_raw = await get_setting("missing_sources", "") or ""
     missing = [x for x in missing_raw.split(",") if x]
     await query.edit_message_text(
-        f"📡 <b>Джерела</b>\n\n"
-        f"🟢 Активно: <b>{active}/{len(SOURCES)}</b>\n"
-        f"🔴 Недоступно: <b>{len(missing)}</b>\n\n"
+        f"📡 <b>Джерела</b>\n\n🟢 Активно: <b>{active}/{len(SOURCES)}</b>\n🔴 Недоступно: <b>{len(missing)}</b>\n\n"
         "Усі джерела працюють у фоні. Реклама та слабкі пости не потрапляють у готову чергу.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="menu")]]),
@@ -199,6 +202,50 @@ async def publish_news(context, row: dict):
         await context.bot.send_message(settings.target_channel, text, parse_mode="HTML", disable_web_page_preview=True)
 
 
+def _clean_editor_text(text_html: str) -> str:
+    text_html = (text_html or "").strip()
+    text_html = re.sub(r'(?is)<a\s+href="https://t\.me/sports_news_ua"[^>]*>.*?</a>\s*→\s*на зв[’\']язку\.?', "", text_html).strip()
+    text_html = re.sub(r"(?im)^\s*SPORTS NEWS\s*→\s*на зв[’']язку\.?\s*$", "", text_html).strip()
+    return text_html
+
+
+async def handle_editor_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    news_id = context.user_data.get("editing_news_id")
+    if not news_id:
+        return
+    row = await get_news(int(news_id))
+    if not row:
+        context.user_data.pop("editing_news_id", None)
+        await update.message.reply_text("Пост уже не знайдено.")
+        return
+
+    corrected = _clean_editor_text(update.message.text_html or update.message.text or "")
+    if len(re.sub(r"<[^>]+>", "", corrected).strip()) < 20:
+        await update.message.reply_text("Текст надто короткий. Надішли повний виправлений пост або натисни Скасувати.")
+        return
+
+    old_ai = row.get("rewritten_text") or ""
+    await save_editorial_feedback(
+        int(news_id),
+        row.get("original_text") or "",
+        old_ai,
+        corrected,
+    )
+    await update_news(int(news_id), rewritten_text=corrected, status="ready")
+    context.user_data.pop("editing_news_id", None)
+    row = await get_news(int(news_id))
+    await update.message.reply_text(
+        f"✅ <b>Правку збережено</b>\n\n"
+        f"Цей варіант тепер використовується для поста #{news_id}, а різниця між AI-текстом і твоєю правкою стала новим редакторським прикладом для наступних генерацій.\n\n"
+        f"{post_html(corrected)}",
+        parse_mode="HTML",
+        reply_markup=item_menu(row),
+        disable_web_page_preview=True,
+    )
+
+
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
@@ -207,8 +254,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
 
     if data == "menu":
+        context.user_data.pop("editing_news_id", None)
         await q.edit_message_text("🏟 <b>SPORTS NEWS CONTROL</b>\n\nОбери розділ:", parse_mode="HTML", reply_markup=main_menu())
     elif data == "queue":
+        context.user_data.pop("editing_news_id", None)
         await show_queue(q)
     elif data == "stats":
         await show_stats(q)
@@ -221,12 +270,11 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "help":
         await q.edit_message_text(
             "ℹ️ <b>Логіка SPORTS NEWS</b>\n\n"
-            "1. Reader читає джерела та відсіює рекламу, #реклама, #промо й сторонні лінки.\n"
-            "2. Згадки BetKing видаляються повністю, але сама корисна новина може пройти далі.\n"
-            "3. AI робить: одне сильне вступне речення + 1-3 короткі абзаци.\n"
-            "4. У фіналі код додає клікабельний SPORTS NEWS → на зв’язку.\n"
-            "5. Фото береться оригінальне; за бажанням можна перегенерувати.\n"
-            "6. Відео ніколи не перегенеровується — публікується оригінал.",
+            "• У бот приходять тільки готові пости.\n"
+            "• ✏️ Редагувати текст — ти надсилаєш свій виправлений варіант, а система зберігає його як редакторський приклад.\n"
+            "• Наступні AI-рерайти враховують останні ручні правки стилю.\n"
+            "• Реальні цитати оформлюються через Telegram blockquote.\n"
+            "• Фото можна перегенерувати, відео лишається оригінальним.",
             parse_mode="HTML",
             reply_markup=main_menu(),
         )
@@ -234,8 +282,26 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         paused = (await get_setting("processing_paused", "false")) == "true"
         await set_setting("processing_paused", "false" if paused else "true")
         await show_control(q)
+    elif data == "cancel_edit":
+        context.user_data.pop("editing_news_id", None)
+        await q.edit_message_text("Редагування скасовано.", reply_markup=main_menu())
     elif data.startswith("item:"):
         await show_item(q, int(data.split(":", 1)[1]))
+    elif data.startswith("edit:"):
+        news_id = int(data.split(":", 1)[1])
+        row = await get_news(news_id)
+        if row:
+            context.user_data["editing_news_id"] = news_id
+            await q.edit_message_text(
+                f"✏️ <b>Редагування поста #{news_id}</b>\n\n"
+                "Надішли наступним повідомленням повністю готовий варіант тексту <b>без фінального SPORTS NEWS</b>.\n"
+                "Можеш використовувати Telegram bold, italic і цитату — форматування збережеться.\n\n"
+                "Після відправки я заміню текст і запам'ятаю твою правку як приклад стилю.\n\n"
+                f"<b>Поточний варіант:</b>\n\n{post_html(row.get('rewritten_text') or '')}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="cancel_edit")]]),
+                disable_web_page_preview=True,
+            )
     elif data.startswith("original:"):
         news_id = int(data.split(":", 1)[1])
         row = await get_news(news_id)
@@ -254,7 +320,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         news_id = int(data.split(":", 1)[1])
         row = await get_news(news_id)
         if row:
-            await q.edit_message_text("🧠 Готую інший варіант…")
+            await q.edit_message_text("🧠 Готую інший варіант з урахуванням твоїх попередніх правок…")
             try:
                 result = await rewrite_news(row.get("original_text") or "", row["source"])
                 rewritten = (result.get("text") or "").strip()
@@ -275,13 +341,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 image_bytes = await generate_news_image(row.get("rewritten_text") or row.get("original_text") or "")
                 buf = BytesIO(image_bytes)
-                buf.name = f"sports_news_{news_id}.png"
-                sent = await context.bot.send_photo(
-                    settings.admin_user_id,
-                    photo=buf,
-                    caption=f"🖼 <b>Новий варіант фото #{news_id}</b>",
-                    parse_mode="HTML",
-                )
+                buf.name = f"sports_news_{news_id}.jpg"
+                sent = await context.bot.send_photo(settings.admin_user_id, photo=buf, caption=f"🖼 <b>Новий варіант фото #{news_id}</b>", parse_mode="HTML")
                 file_id = sent.photo[-1].file_id
                 await update_news(news_id, media_file_id=file_id)
                 row = await get_news(news_id)
@@ -319,6 +380,7 @@ async def start_admin_bot() -> Application:
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_editor_text))
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
