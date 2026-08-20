@@ -1,3 +1,5 @@
+import random
+
 IMAGE_TEMPLATES = {
     "spotlight": {
         "label": "🎯 Spotlight",
@@ -41,8 +43,10 @@ IMAGE_TEMPLATES = {
     },
 }
 
-DEFAULT_IMAGE_TEMPLATE = "spotlight"
+DEFAULT_IMAGE_TEMPLATE = "auto"
 
 
 def get_template(key: str):
-    return IMAGE_TEMPLATES.get(key, IMAGE_TEMPLATES[DEFAULT_IMAGE_TEMPLATE])
+    if key == "auto":
+        return random.choice(list(IMAGE_TEMPLATES.values()))
+    return IMAGE_TEMPLATES.get(key, IMAGE_TEMPLATES["spotlight"])
