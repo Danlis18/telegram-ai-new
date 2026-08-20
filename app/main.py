@@ -16,7 +16,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from app.admin_bot import start_admin_bot, stop_admin_bot
 from app.ai_editor import rewrite_news
 from app.config import settings
-from app.database import get_setting, init_db, save, seen, set_setting
+from app.database import get_setting, init_db, save, seen, set_setting, update_news
 from app.sources import SOURCES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -28,7 +28,6 @@ ACTIVE_SOURCE_IDS: dict[int, str] = {}
 def get_session_file_b64() -> str | None:
     if settings.telegram_session_file_b64:
         return settings.telegram_session_file_b64
-
     chunks = []
     index = 1
     while True:
@@ -37,7 +36,6 @@ def get_session_file_b64() -> str | None:
             break
         chunks.append(value.strip())
         index += 1
-
     return "".join(chunks) if chunks else None
 
 
@@ -45,23 +43,13 @@ def build_reader():
     session_b64 = get_session_file_b64()
     if session_b64:
         from opentele2.tl import TelegramClient as DesktopTelegramClient
-
         session_path = Path(settings.session_file_path)
         session_path.parent.mkdir(parents=True, exist_ok=True)
         session_path.write_bytes(base64.b64decode(session_b64))
         return DesktopTelegramClient(str(session_path))
-
     if settings.telegram_session and settings.telegram_api_id and settings.telegram_api_hash:
-        return TelethonClient(
-            StringSession(settings.telegram_session),
-            settings.telegram_api_id,
-            settings.telegram_api_hash,
-        )
-
-    raise RuntimeError(
-        "Telegram reader is not configured. Set TELEGRAM_SESSION_FILE_B64, numbered TELEGRAM_SESSION_FILE_B64_1..N chunks, "
-        "or TELEGRAM_SESSION + TELEGRAM_API_ID + TELEGRAM_API_HASH."
-    )
+        return TelethonClient(StringSession(settings.telegram_session), settings.telegram_api_id, settings.telegram_api_hash)
+    raise RuntimeError("Telegram reader is not configured")
 
 
 reader = build_reader()
@@ -85,10 +73,8 @@ async def notify_admin(text: str, reply_markup=None) -> None:
 
 
 async def sync_sources() -> tuple[int, list[str]]:
-    """Resolve monitored channels and join public channels that are not yet in this account."""
     ACTIVE_SOURCE_IDS.clear()
     joined_by_username: dict[str, tuple[int, str]] = {}
-
     async for dialog in reader.iter_dialogs():
         entity = dialog.entity
         username = getattr(entity, "username", None)
@@ -97,14 +83,12 @@ async def sync_sources() -> tuple[int, list[str]]:
 
     missing: list[str] = []
     joined_now = 0
-
     for source in SOURCES:
         cached = joined_by_username.get(source.lower())
         if cached:
             chat_id, canonical = cached
             ACTIVE_SOURCE_IDS[int(chat_id)] = canonical
             continue
-
         try:
             entity = await reader.get_entity(source)
             try:
@@ -122,7 +106,6 @@ async def sync_sources() -> tuple[int, list[str]]:
                 log.exception("Could not join source @%s", source)
                 missing.append(source)
                 continue
-
             canonical = getattr(entity, "username", None) or source
             ACTIVE_SOURCE_IDS[get_peer_id(entity)] = canonical
         except Exception:
@@ -136,29 +119,19 @@ async def sync_sources() -> tuple[int, list[str]]:
 
     await set_setting("active_sources", str(len(ACTIVE_SOURCE_IDS)))
     await set_setting("missing_sources", ",".join(missing))
-    log.info(
-        "Source audit complete: active=%d/%d, joined_now=%d, missing=%d",
-        len(ACTIVE_SOURCE_IDS), len(SOURCES), joined_now, len(missing),
-    )
+    log.info("Source audit complete: active=%d/%d, joined_now=%d, missing=%d", len(ACTIVE_SOURCE_IDS), len(SOURCES), joined_now, len(missing))
     return joined_now, missing
 
 
-def action_buttons(news_id: int, status: str) -> InlineKeyboardMarkup:
-    if status == "ready":
-        first = [
+def action_buttons(news_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
             InlineKeyboardButton("✅ Опублікувати", callback_data=f"publish:{news_id}"),
             InlineKeyboardButton("🔄 Перегенерувати", callback_data=f"regen:{news_id}"),
-        ]
-    else:
-        first = [
-            InlineKeyboardButton("🔄 Перегенерувати", callback_data=f"regen:{news_id}"),
-            InlineKeyboardButton("⏭ Пропустити", callback_data=f"skip:{news_id}"),
-        ]
-    return InlineKeyboardMarkup([
-        first,
+        ],
         [
             InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}"),
-            InlineKeyboardButton("📰 Черга", callback_data="queue"),
+            InlineKeyboardButton("⏭ Пропустити", callback_data=f"skip:{news_id}"),
         ],
     ])
 
@@ -168,11 +141,33 @@ async def process_message(event, source: str, *, backfill: bool = False) -> None
         return
 
     text = (event.raw_text or "").strip()
-    if len(text) < 25:
-        log.info("Skipped @%s #%s: no/short caption", source, event.id)
-        return
-    if await seen(text):
+    has_media = bool(getattr(event, "media", None))
+    stored_original = text or f"[MEDIA_ONLY] @{source} #{event.id}"
+
+    if await seen(stored_original):
         log.info("Skipped @%s #%s: exact duplicate", source, event.id)
+        return
+
+    # Save and show EVERY captured post before AI touches it.
+    initial_status = "raw" if len(text) < 25 else "received"
+    news_id = await save(source, event.id, stored_original, "", 0, initial_status)
+    if not news_id:
+        return
+
+    readable = text if text else "📎 Медіапост без текстового підпису"
+    media_note = "\n🖼 Є медіа" if has_media else ""
+    backfill_note = "\n🕘 Відновлено після перезапуску" if backfill else ""
+    await notify_admin(
+        f"📥 <b>Отримано пост #{news_id}</b>\n"
+        f"📡 @{html.escape(source)}{media_note}{backfill_note}\n\n"
+        f"{html.escape(readable[:2500])}\n\n"
+        "⏳ <i>AI-обробка запускається окремо; оригінал уже не загубиться.</i>",
+        action_buttons(news_id),
+    )
+    log.info("Captured @%s #%s news_id=%s chars=%d media=%s backfill=%s", source, event.id, news_id, len(text), has_media, backfill)
+
+    # Tiny captions and media-only posts are still visible to admin, but are not sent to AI.
+    if len(text) < 25:
         return
 
     try:
@@ -187,27 +182,30 @@ async def process_message(event, source: str, *, backfill: bool = False) -> None
             await publisher.send_message(settings.target_channel, rewritten, disable_web_page_preview=True)
             status = "published"
 
-        news_id = await save(source, event.id, text, rewritten, score, status)
-        log.info(
-            "@%s #%s score=%s status=%s news_id=%s backfill=%s reason=%s",
-            source, event.id, score, status, news_id, backfill, reason[:200],
-        )
+        await update_news(news_id, rewritten_text=rewritten, score=score, status=status)
+        log.info("Processed @%s #%s score=%s status=%s news_id=%s reason=%s", source, event.id, score, status, news_id, reason[:200])
 
-        if news_id and status in {"ready", "rejected"}:
-            preview_text = rewritten or text
-            preview = html.escape(preview_text[:2200])
-            badge = "🆕" if status == "ready" else "⚠️"
-            label = "Готова до публікації" if status == "ready" else "AI не пропустив автоматично"
+        if status != "published":
+            preview = html.escape((rewritten or text)[:2400])
+            badge = "✅" if status == "ready" else "⚠️"
+            label = "AI-переписав і схвалив" if status == "ready" else "AI обробив, але не схвалив автоматично"
             reason_html = f"\n📝 Причина: {html.escape(reason[:500])}" if reason else ""
-            backfill_html = "\n🕘 Відновлено після перезапуску" if backfill else ""
             await notify_admin(
                 f"{badge} <b>{label} #{news_id}</b>\n"
-                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>"
-                f"{backfill_html}{reason_html}\n\n{preview}",
-                action_buttons(news_id, status),
+                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>{reason_html}\n\n{preview}",
+                action_buttons(news_id),
             )
-    except Exception:
-        log.exception("Failed processing @%s #%s", source, event.id)
+    except Exception as exc:
+        await update_news(news_id, status="ai_error")
+        log.exception("AI failed for @%s #%s news_id=%s", source, event.id, news_id)
+        await notify_admin(
+            f"🔴 <b>AI ERROR #{news_id}</b>\n"
+            f"📡 @{html.escape(source)}\n\n"
+            f"Оригінальний пост збережено і доступний нижче.\n"
+            f"Помилка: <code>{html.escape(type(exc).__name__)}</code>\n\n"
+            f"{html.escape(text[:2400])}",
+            action_buttons(news_id),
+        )
 
 
 @reader.on(events.NewMessage)
@@ -219,7 +217,6 @@ async def on_news(event):
 
 
 async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
-    """Process a few recent posts so deploys/restarts do not create blind gaps."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     processed = 0
     for chat_id, source in list(ACTIVE_SOURCE_IDS.items()):
@@ -228,7 +225,8 @@ async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
             for message in reversed(messages):
                 if not message.date or message.date < cutoff:
                     continue
-                if await seen((message.raw_text or "").strip()):
+                stored_original = (message.raw_text or "").strip() or f"[MEDIA_ONLY] @{source} #{message.id}"
+                if await seen(stored_original):
                     continue
                 await process_message(message, source, backfill=True)
                 processed += 1
@@ -249,13 +247,7 @@ async def main():
         await reader.start()
         me = await reader.get_me()
         joined_now, missing = await sync_sources()
-        log.info(
-            "Reader authorized as %s; active sources=%d/%d; auto_publish=%s; admin_bot=online",
-            me.id,
-            len(ACTIVE_SOURCE_IDS),
-            len(SOURCES),
-            settings.auto_publish,
-        )
+        log.info("Reader authorized as %s; active sources=%d/%d; auto_publish=%s; admin_bot=online", me.id, len(ACTIVE_SOURCE_IDS), len(SOURCES), settings.auto_publish)
         await notify_admin(
             "🟢 <b>AI NEWS CONTROL запущено</b>\n\n"
             f"Reader: <b>ONLINE</b>\n"
@@ -263,7 +255,7 @@ async def main():
             f"Нових підписок цього запуску: <b>{joined_now}</b>\n"
             f"Недоступних джерел: <b>{len(missing)}</b>\n"
             f"Автопублікація: <b>{'ON' if settings.auto_publish else 'OFF'}</b>\n\n"
-            "Тепер бот показує не лише схвалені, а й відхилені AI новини з причиною."
+            "Тепер КОЖЕН отриманий пост спочатку приходить у бот як оригінал, а потім окремо — результат AI."
         )
         asyncio.create_task(backfill_recent())
         await reader.run_until_disconnected()
