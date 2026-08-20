@@ -127,7 +127,7 @@ def action_buttons(news_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Опублікувати", callback_data=f"publish:{news_id}"),
-            InlineKeyboardButton("🔄 Перегенерувати", callback_data=f"regen:{news_id}"),
+            InlineKeyboardButton("🔄 Інший варіант", callback_data=f"regen:{news_id}"),
         ],
         [
             InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}"),
@@ -136,37 +136,25 @@ def action_buttons(news_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-async def process_message(event, source: str, *, backfill: bool = False) -> None:
+async def process_message(event, source: str, *, backfill: bool = False, push_ready: bool = True) -> None:
     if (await get_setting("processing_paused", "false")) == "true":
         return
 
     text = (event.raw_text or "").strip()
-    has_media = bool(getattr(event, "media", None))
     stored_original = text or f"[MEDIA_ONLY] @{source} #{event.id}"
 
     if await seen(stored_original):
         log.info("Skipped @%s #%s: exact duplicate", source, event.id)
         return
 
-    # Save and show EVERY captured post before AI touches it.
+    # Keep all captured material in the database, but do not push raw/rejected posts to admin.
     initial_status = "raw" if len(text) < 25 else "received"
     news_id = await save(source, event.id, stored_original, "", 0, initial_status)
     if not news_id:
         return
 
-    readable = text if text else "📎 Медіапост без текстового підпису"
-    media_note = "\n🖼 Є медіа" if has_media else ""
-    backfill_note = "\n🕘 Відновлено після перезапуску" if backfill else ""
-    await notify_admin(
-        f"📥 <b>Отримано пост #{news_id}</b>\n"
-        f"📡 @{html.escape(source)}{media_note}{backfill_note}\n\n"
-        f"{html.escape(readable[:2500])}\n\n"
-        "⏳ <i>AI-обробка запускається окремо; оригінал уже не загубиться.</i>",
-        action_buttons(news_id),
-    )
-    log.info("Captured @%s #%s news_id=%s chars=%d media=%s backfill=%s", source, event.id, news_id, len(text), has_media, backfill)
+    log.info("Captured @%s #%s news_id=%s chars=%d backfill=%s", source, event.id, news_id, len(text), backfill)
 
-    # Tiny captions and media-only posts are still visible to admin, but are not sent to AI.
     if len(text) < 25:
         return
 
@@ -185,27 +173,18 @@ async def process_message(event, source: str, *, backfill: bool = False) -> None
         await update_news(news_id, rewritten_text=rewritten, score=score, status=status)
         log.info("Processed @%s #%s score=%s status=%s news_id=%s reason=%s", source, event.id, score, status, news_id, reason[:200])
 
-        if status != "published":
-            preview = html.escape((rewritten or text)[:2400])
-            badge = "✅" if status == "ready" else "⚠️"
-            label = "AI-переписав і схвалив" if status == "ready" else "AI обробив, але не схвалив автоматично"
-            reason_html = f"\n📝 Причина: {html.escape(reason[:500])}" if reason else ""
+        # Only fully moderated, publication-ready variants are pushed to admin.
+        if status == "ready" and push_ready:
+            preview = html.escape(rewritten[:2600])
             await notify_admin(
-                f"{badge} <b>{label} #{news_id}</b>\n"
-                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>{reason_html}\n\n{preview}",
+                f"✅ <b>Готовий пост #{news_id}</b>\n"
+                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>\n\n"
+                f"{preview}",
                 action_buttons(news_id),
             )
-    except Exception as exc:
+    except Exception:
         await update_news(news_id, status="ai_error")
         log.exception("AI failed for @%s #%s news_id=%s", source, event.id, news_id)
-        await notify_admin(
-            f"🔴 <b>AI ERROR #{news_id}</b>\n"
-            f"📡 @{html.escape(source)}\n\n"
-            f"Оригінальний пост збережено і доступний нижче.\n"
-            f"Помилка: <code>{html.escape(type(exc).__name__)}</code>\n\n"
-            f"{html.escape(text[:2400])}",
-            action_buttons(news_id),
-        )
 
 
 @reader.on(events.NewMessage)
@@ -228,7 +207,8 @@ async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
                 stored_original = (message.raw_text or "").strip() or f"[MEDIA_ONLY] @{source} #{message.id}"
                 if await seen(stored_original):
                     continue
-                await process_message(message, source, backfill=True)
+                # Backfill fills the queue silently; it must not spam the admin chat on deploy.
+                await process_message(message, source, backfill=True, push_ready=False)
                 processed += 1
             await asyncio.sleep(0.12)
         except FloodWaitError as exc:
@@ -252,10 +232,8 @@ async def main():
             "🟢 <b>AI NEWS CONTROL запущено</b>\n\n"
             f"Reader: <b>ONLINE</b>\n"
             f"Активні джерела: <b>{len(ACTIVE_SOURCE_IDS)}/{len(SOURCES)}</b>\n"
-            f"Нових підписок цього запуску: <b>{joined_now}</b>\n"
-            f"Недоступних джерел: <b>{len(missing)}</b>\n"
             f"Автопублікація: <b>{'ON' if settings.auto_publish else 'OFF'}</b>\n\n"
-            "Тепер КОЖЕН отриманий пост спочатку приходить у бот як оригінал, а потім окремо — результат AI."
+            "У чат приходитимуть тільки готові пости, які пройшли AI-модерацію."
         )
         asyncio.create_task(backfill_recent())
         await reader.run_until_disconnected()
