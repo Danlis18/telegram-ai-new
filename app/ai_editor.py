@@ -20,21 +20,23 @@ SYSTEM_PROMPT = """Ти редактор українського спортив
 Пиши самостійний, живий Telegram-пост українською тільки з фактів джерела.
 
 СТРУКТУРА ТА ПУНКТУАЦІЯ:
-1. Перший абзац — одне коротке речення-хук приблизно до 100 символів і максимум 1-2 рядки Telegram.
-- Увесь хук обов'язково оформлюй <b>...</b>.
+1. Перший абзац — ОДИН тематичний emoji + одне коротке речення-хук приблизно до 100 символів і максимум 1-2 рядки Telegram.
+- Emoji ОБОВ'ЯЗКОВО став на самому початку, перед першим словом: <b>🔥 Текст хука!</b>
+- Обирай emoji тематично під конкретну новину, а не один і той самий постійно: трансфер, матч, травма, заява, рекорд, сенсація тощо.
+- Увесь emoji разом із хуком обов'язково оформлюй <b>...</b>.
 - НІКОЛИ не став крапку в кінці першого речення.
 - У кінці хука дозволено або знак оклику !, або взагалі без кінцевого знака.
-- Не став emoji у першому абзаці.
+- У першому абзаці не використовуй більше одного emoji.
 
 2. Другий абзац — перший змістовний абзац тіла новини.
 - ВІН НЕ МАЄ ПОВТОРЮВАТИ ЗАГОЛОВОК іншими словами.
 - Якщо хук уже повідомив факт «хто + що сталося», другий абзац повинен одразу додати НОВУ інформацію: деталі, умови, контекст, причину, наслідок, рахунок, суперника, суму, цитату або інший факт із джерела.
-- Заборонено робити пару типу: «NAVІ вилетіли з EWC!» → «NAVI та MongolZ вибули з EWC». Це дубль, а не розвиток новини.
+- Заборонено робити пару типу: «NAVI вилетіли з EWC!» → «NAVI та MongolZ вибули з EWC». Це дубль, а не розвиток новини.
 - Основна частина повинна РОЗКРИВАТИ хук, а не переказувати його.
-- Саме тут, якщо це природно, можна використати ОДИН доречний emoji.
-- Emoji став тільки в кінці повного речення.
+- Саме тут, якщо це природно, можна використати ще ОДИН доречний emoji.
+- Emoji у другому абзаці став тільки в кінці повного речення.
 - Не став emoji всередині речення, після окремого слова, після двокрапки, у середині цитати або одразу після закриття цитати.
-- Якщо emoji не пасує — не став його взагалі.
+- Якщо другий emoji не пасує — не став його взагалі.
 
 3. Далі — ще 0-2 короткі абзаци залежно від обсягу джерела. Не роздувай коротку новину і не обрізай важливу.
 - Кожен наступний абзац має додавати новий зміст, а не повторювати попередній.
@@ -131,8 +133,6 @@ async def rewrite_news(text: str, source: str) -> dict:
     examples = await get_style_examples(6)
     result = await _request_rewrite(clean_text, source, examples)
     result["text"] = sanitize_source_text((result.get("text") or "").strip())
-
-    # One automatic editorial retry if the hook and first body paragraph substantially repeat each other.
     if result.get("publish") and _headline_body_overlap(result["text"]) >= 0.62:
         retry_note = (
             "\n\nВАЖЛИВА ПОВТОРНА ПРАВКА: попередній варіант повторив зміст хука у другому абзаці. "
@@ -142,7 +142,6 @@ async def rewrite_news(text: str, source: str) -> dict:
         retry = await _request_rewrite(clean_text, source, examples, retry_note)
         retry["text"] = sanitize_source_text((retry.get("text") or "").strip())
         result = retry
-
     return result
 
 
@@ -151,44 +150,34 @@ def _to_four_three(image_bytes: bytes) -> bytes:
     target_ratio = 4 / 3
     ratio = image.width / image.height
     if ratio > target_ratio:
-        new_w = int(image.height * target_ratio)
-        left = (image.width - new_w) // 2
+        new_w = int(image.height * target_ratio); left = (image.width - new_w) // 2
         image = image.crop((left, 0, left + new_w, image.height))
     elif ratio < target_ratio:
-        new_h = int(image.width / target_ratio)
-        top = (image.height - new_h) // 2
+        new_h = int(image.width / target_ratio); top = (image.height - new_h) // 2
         image = image.crop((0, top, image.width, top + new_h))
     image = image.resize((1200, 900), Image.Resampling.LANCZOS)
-    out = BytesIO()
-    image.save(out, format="JPEG", quality=94, optimize=True)
-    return out.getvalue()
+    out = BytesIO(); image.save(out, format="JPEG", quality=94, optimize=True); return out.getvalue()
 
 
 def _add_sports_news_brand(image_bytes: bytes) -> bytes:
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
-    width, height = image.size
-    draw = ImageDraw.Draw(image, "RGBA")
-    plate_w, plate_h = int(width * 0.22), int(height * 0.105)
-    x0, y0 = int(width * 0.035), int(height * 0.84)
+    width, height = image.size; draw = ImageDraw.Draw(image, "RGBA")
+    plate_w, plate_h = int(width * 0.22), int(height * 0.105); x0, y0 = int(width * 0.035), int(height * 0.84)
     draw.rounded_rectangle((x0, y0, x0 + plate_w, y0 + plate_h), radius=12, fill=(5, 7, 10, 205), outline=(214, 170, 45, 180), width=2)
     try:
-        big = ImageFont.truetype("DejaVuSans-Bold.ttf", int(height * 0.045))
-        small = ImageFont.truetype("DejaVuSans-Bold.ttf", int(height * 0.018))
+        big = ImageFont.truetype("DejaVuSans-Bold.ttf", int(height * 0.045)); small = ImageFont.truetype("DejaVuSans-Bold.ttf", int(height * 0.018))
     except OSError:
         big = ImageFont.load_default(); small = ImageFont.load_default()
-    draw.text((x0 + 16, y0 + 8), "SN", font=big, fill=(226, 183, 54, 255))
-    draw.text((x0 + 82, y0 + 25), "SPORTS NEWS", font=small, fill=(250, 250, 248, 255))
-    out = BytesIO(); image.save(out, format="JPEG", quality=94, optimize=True)
-    return out.getvalue()
+    draw.text((x0 + 16, y0 + 8), "SN", font=big, fill=(226, 183, 54, 255)); draw.text((x0 + 82, y0 + 25), "SPORTS NEWS", font=small, fill=(250, 250, 248, 255))
+    out = BytesIO(); image.save(out, format="JPEG", quality=94, optimize=True); return out.getvalue()
 
 
 async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
     selected_key, template = get_template(template_key, news_text)
     common = (
-        "Create a photorealistic premium Ukrainian football/sports news editorial card. "
-        "Use a LANDSCAPE 4:3 composition. This belongs to one consistent SPORTS NEWS visual system: deep charcoal/black base, restrained metallic-gold accents, crisp white typography zones, cinematic stadium/editorial lighting, realistic contact shadows, rim light, depth, subtle grain and believable photographic texture. "
+        "Create a photorealistic premium Ukrainian football/sports news editorial card. Use a LANDSCAPE 4:3 composition. "
+        "This belongs to one consistent SPORTS NEWS visual system: deep charcoal/black base, restrained metallic-gold accents, crisp white typography zones, cinematic stadium/editorial lighting, realistic contact shadows, rim light, depth, subtle grain and believable photographic texture. "
         "It must look human art-directed, not AI-generated: realistic anatomy, face, hands, jersey fabric, hair, skin, perspective and shadows; no plastic skin, surreal geometry, fake details or excessive glow. "
-        "Keep the family resemblance of the six approved templates, but vary crop, subject position, diagonals, background depth and accent placement so consecutive cards are not clones. "
         f"Selected thematic template: {selected_key}. {template['prompt']} "
         "SPORTS NEWS branding must be clearly recognizable as an SN + SPORTS NEWS lockup, integrated into a safe corner or clean negative-space area. It should be noticeable but secondary to the news, never cover a face, player, score or headline. "
         "Avoid/remove all betting brands, sponsor marks, source-channel logos, watermarks and unrelated media branding. Do not invent team crests, sponsor logos, scores, statistics or quotes. "
