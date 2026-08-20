@@ -91,7 +91,17 @@ async def get_queue(limit: int = 20):
     async with aiosqlite.connect(settings.database_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT * FROM news WHERE status IN ('received','ready','rejected','ai_error','raw') ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM news WHERE status='ready' ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_archive(limit: int = 20):
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM news WHERE status IN ('published','skipped','rejected','ai_error','raw') ORDER BY id DESC LIMIT ?",
             (limit,),
         )
         return [dict(r) for r in await cur.fetchall()]
@@ -120,6 +130,6 @@ async def stats():
         }.items():
             cur = await db.execute(f"SELECT COUNT(*) FROM news WHERE {where}")
             result[key] = (await cur.fetchone())[0]
-        cur = await db.execute("SELECT COALESCE(AVG(score),0) FROM news")
+        cur = await db.execute("SELECT COALESCE(AVG(score),0) FROM news WHERE score > 0")
         result["avg_score"] = round((await cur.fetchone())[0], 1)
         return result
