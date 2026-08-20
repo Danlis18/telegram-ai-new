@@ -219,8 +219,6 @@ def _add_sports_news_logo(image_bytes: bytes) -> bytes:
 
 def _effective_image_model() -> str:
     configured = (settings.openai_image_model or "").strip()
-    # gpt-image-1 is now legacy/deprecated. Keep Railway configuration compatible,
-    # but transparently use the current editing model when the old default is still set.
     if not configured or configured == "gpt-image-1":
         return "gpt-image-2"
     return configured
@@ -297,12 +295,11 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
 
     if source_image:
         source_image = _normalize_to_jpeg(source_image, "SOURCE_IMAGE")
-        needs_cleanup = await _source_needs_cleanup(source_image)
-        log.info("Image edit path: needs_cleanup=%s model=%s", needs_cleanup, image_model)
 
-        if not needs_cleanup:
-            # Clean photo: do not run generative editing. Only add our exact brand asset.
-            return _add_sports_news_logo(source_image)
+        # Manual image editing is explicit user intent. Do not gate it behind the
+        # vision classifier: the direct /testedit proved images.edit works, while
+        # classifier false-CLEAN verdicts were skipping the edit entirely.
+        log.info("Image edit path: forced manual edit model=%s", image_model)
 
         image_file = BytesIO(source_image)
         image_file.name = "source.jpg"
@@ -313,6 +310,7 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
                 prompt=(
                     "EDIT THIS EXACT SOURCE IMAGE; DO NOT CREATE A NEW SCENE. "
                     "Remove ALL added/overlaid text and graphic overlays from the image: headlines, captions, quote blocks, scores, dates, player names, lists, numbers, arrows, graphic labels, media/channel names, watermarks, bookmaker/casino/betting branding, sponsor/promo blocks and any other overlaid logos or promotional graphics. "
+                    "If there are no removable overlays, preserve the source photograph as closely as possible and do not invent changes. "
                     "Reconstruct only the small areas hidden behind those overlays so they naturally match the surrounding original background. "
                     "Preserve the underlying sports photograph as faithfully as possible: same real person, face, expression, body, pose, clothing, crop, camera angle, stadium/background, colors, lighting, shadows and photographic texture. "
                     "Do not redesign, restyle, recolor, relight, beautify, sharpen, change anatomy or invent a different person. "
