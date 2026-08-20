@@ -7,6 +7,7 @@ from openai import AsyncOpenAI
 from PIL import Image, ImageDraw, ImageFont
 
 from app.config import settings
+from app.database import get_style_examples
 from app.image_templates import DEFAULT_IMAGE_TEMPLATE, get_template
 
 client = AsyncOpenAI(api_key=settings.openai_api_key)
@@ -18,17 +19,38 @@ AD_TAG_RE = re.compile(r"(?i)(#реклама|#промо|#promo|#advertising|#a
 SYSTEM_PROMPT = """Ти редактор українського спортивного Telegram-каналу SPORTS NEWS.
 Пиши самостійний, живий Telegram-пост українською тільки з фактів джерела.
 
-СТРУКТУРА:
-1. Почни з одного доречного emoji та одного короткого речення-хука приблизно до 100 символів. Увесь хук: <b>...</b>.
-2. Після порожнього рядка дай 1-3 короткі природні абзаци приблизно в обсязі джерела. Доречно використай ще одне emoji після одного з абзаців. Можна стримано виділити 1-3 ключові слова через <b> або <i>.
-3. Якщо джерело містить реальну пряму мову, заяву, коментар або дослівну цитату людини — найважливішу цитату оформлюй нативним Telegram HTML: <blockquote>...</blockquote>. Не роби blockquote зі звичайного переказу. Не вигадуй і не розширюй цитати.
-4. SPORTS NEWS в кінці не додавай — це робить код.
+СТРУКТУРА ТА ПУНКТУАЦІЯ:
+1. Перший абзац — одне коротке речення-хук приблизно до 100 символів і максимум 1-2 рядки Telegram.
+- Увесь хук обов'язково оформлюй <b>...</b>.
+- НІКОЛИ не став крапку в кінці першого речення.
+- У кінці хука дозволено або знак оклику !, або взагалі без кінцевого знака.
+- Не став emoji у першому абзаці.
+
+2. Другий абзац — перший змістовний абзац тіла новини.
+- Саме тут, якщо це природно, можна використати ОДИН доречний emoji.
+- Emoji став тільки в кінці повного речення.
+- Не став emoji всередині речення, після окремого слова, після двокрапки, у середині цитати або одразу після закриття цитати.
+- Якщо emoji не пасує — не став його взагалі.
+
+3. Далі — ще 0-2 короткі абзаци залежно від обсягу джерела. Не роздувай коротку новину і не обрізай важливу.
+- Додаткові emoji зазвичай не потрібні.
+- Можна стримано виділити 1-3 ключові слова через <b> або <i>, якщо це реально допомагає читанню.
+
+4. Якщо джерело містить реальну пряму мову, заяву, коментар або дослівну цитату людини — найважливішу цитату оформлюй нативним Telegram HTML: <blockquote>...</blockquote>.
+- Не роби blockquote зі звичайного переказу.
+- Не вигадуй, не дописуй і не прикрашай цитату.
+- Emoji не став у кінці blockquote.
+
+5. SPORTS NEWS в кінці не додавай — це робить код.
 
 СТИЛЬ:
-Жива сучасна українська, спортивна й природна. Без AI-канцеляризмів, води, довгих розділювачів, декоративного сміття і штучного клікбейту. Варіюй ритм і подачу. Не перевантажуй bold/italic/emoji.
+Жива сучасна українська, спортивна й природна. Без AI-канцеляризмів, води, довгих розділювачів, декоративного сміття і штучного клікбейту. Варіюй ритм та конструкції, щоб пости не виглядали шаблонними. Форматування стримане і функціональне.
 
 МОДЕРАЦІЯ:
 Не вигадуй фактів, цитат, рахунків, дат, сум чи причин. Видаляй рекламу, CTA, промокоди, згадки джерела і BetKing/Беткінг. Не вставляй зовнішні посилання. Сумнівне або рекламне: publish=false.
+
+НАВЧАННЯ НА ПРАВКАХ РЕДАКТОРА:
+Якщо нижче передані приклади ручних виправлень редактора, вважай corrected_text еталоном стилю. Аналізуй, що редактор змінив порівняно з ai_text, і повторюй ці закономірності в нових постах. Не копіюй факти з прикладів у нову новину — переймай лише стиль, ритм, форматування та редакторські звички.
 
 ФОРМАТ:
 Поле text може містити тільки Telegram HTML <b>, <i>, <blockquote>. Не використовуй Markdown.
@@ -52,12 +74,24 @@ def is_advertising_post(text: str) -> tuple[bool, str]:
     return False, ""
 
 
+def _feedback_context(examples: list[dict]) -> str:
+    if not examples:
+        return ""
+    chunks = ["\n\nОСТАННІ РУЧНІ ПРАВКИ РЕДАКТОРА (corrected_text = еталон):"]
+    for idx, example in enumerate(reversed(examples), 1):
+        ai_text = (example.get("ai_text") or "")[:900]
+        corrected = (example.get("corrected_text") or "")[:900]
+        chunks.append(f"\nПриклад {idx}:\nAI:\n{ai_text}\nРЕДАКТОР:\n{corrected}")
+    return "\n".join(chunks)
+
+
 async def rewrite_news(text: str, source: str) -> dict:
     clean_text = sanitize_source_text(text)
+    examples = await get_style_examples(6)
     response = await client.responses.create(
         model=settings.openai_model,
         input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": SYSTEM_PROMPT + _feedback_context(examples)},
             {"role": "user", "content": f"Джерело: @{source}\n\nНовина:\n{clean_text}"},
         ],
     )
@@ -91,7 +125,6 @@ def _add_sports_news_brand(image_bytes: bytes) -> bytes:
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     width, height = image.size
     draw = ImageDraw.Draw(image, "RGBA")
-    # Small premium brand plate in a safe corner; visible but never covering the subject/headline.
     plate_w, plate_h = int(width * 0.22), int(height * 0.105)
     x0, y0 = int(width * 0.035), int(height * 0.84)
     draw.rounded_rectangle((x0, y0, x0 + plate_w, y0 + plate_h), radius=12, fill=(5, 7, 10, 205), outline=(214, 170, 45, 180), width=2)
