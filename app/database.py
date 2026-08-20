@@ -87,10 +87,13 @@ async def update_news(news_id: int, **fields) -> None:
         await db.commit()
 
 
-async def get_queue(limit: int = 15):
+async def get_queue(limit: int = 20):
     async with aiosqlite.connect(settings.database_path) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM news WHERE status='ready' ORDER BY id DESC LIMIT ?", (limit,))
+        cur = await db.execute(
+            "SELECT * FROM news WHERE status IN ('received','ready','rejected','ai_error','raw') ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
         return [dict(r) for r in await cur.fetchall()]
 
 
@@ -111,6 +114,9 @@ async def stats():
             "published": "status='published'",
             "rejected": "status='rejected'",
             "skipped": "status='skipped'",
+            "received": "status='received'",
+            "ai_error": "status='ai_error'",
+            "raw": "status='raw'",
         }.items():
             cur = await db.execute(f"SELECT COUNT(*) FROM news WHERE {where}")
             result[key] = (await cur.fetchone())[0]
