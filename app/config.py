@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,11 +30,19 @@ settings = Settings()
 
 # Railway containers are ephemeral between redeploys. If a Railway Volume is
 # mounted, transparently keep SQLite on that volume unless DATABASE_PATH was
-# explicitly overridden. This preserves post history, generation counters,
-# prompts, uploaded logos and templates across bot restarts/deploys.
+# explicitly overridden. If the legacy DB is visible on the first volume-backed
+# boot, copy it once so the existing history is retained.
 railway_volume = (os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()
 if railway_volume and settings.database_path == "data/news.db":
-    settings.database_path = str(Path(railway_volume) / "sports_news.db")
+    persistent_db = Path(railway_volume) / "sports_news.db"
+    legacy_db = Path("data/news.db")
+    try:
+        persistent_db.parent.mkdir(parents=True, exist_ok=True)
+        if not persistent_db.exists() and legacy_db.exists():
+            shutil.copy2(legacy_db, persistent_db)
+    except Exception:
+        pass
+    settings.database_path = str(persistent_db)
 
 
 # python-telegram-bot processes updates sequentially by default. In this project
