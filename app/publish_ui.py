@@ -14,8 +14,10 @@ from telegram.ext import (
     filters,
 )
 
+from app.auth import is_authorized_id
 from app.config import settings
 from app.database import (
+    get_default_target,
     get_due_scheduled,
     get_news,
     get_scheduled,
@@ -39,7 +41,7 @@ def _tz() -> ZoneInfo:
 
 def _is_admin(update: Update) -> bool:
     user = update.effective_user
-    return bool(user and settings.admin_user_id and user.id == settings.admin_user_id)
+    return bool(user and is_authorized_id(user.id))
 
 
 def _preview_buttons(news_id: int) -> InlineKeyboardMarkup:
@@ -54,25 +56,29 @@ async def show_control_panel(query) -> None:
     paused = (await get_setting("processing_paused", "false")) == "true"
     publish_mode = await get_publish_mode()
     photo_mode = await get_photo_edit_mode()
+    target = await get_default_target(query.from_user.id)
 
     publish_label = "🤖 Автопостинг" if publish_mode == "auto" else "👤 Ручна публікація"
     photo_label = "🤖 Автообробка фото" if photo_mode == "auto" else "👤 Ручна обробка фото"
-    pause_label = "▶️ Відновити reader" if paused else "⏸ Призупинити reader"
+    pause_label = "▶️ Відновити мої джерела" if paused else "⏸ Призупинити мої джерела"
+    target_name = (target or {}).get("title") or (target or {}).get("channel_ref") or "не налаштовано"
 
     await query.edit_message_text(
         "⚙️ <b>Керування SPORTS NEWS</b>\n\n"
-        f"Reader: <b>{'⏸ ПРИЗУПИНЕНО' if paused else '🟢 ПРАЦЮЄ'}</b>\n"
+        f"Обробка моїх джерел: <b>{'⏸ ПРИЗУПИНЕНО' if paused else '🟢 ПРАЦЮЄ'}</b>\n"
         f"Публікація: <b>{'АВТО' if publish_mode == 'auto' else 'РУЧНА'}</b>\n"
         f"Обробка фото: <b>{'АВТО' if photo_mode == 'auto' else 'РУЧНА'}</b>\n"
+        f"Канал публікації: <b>{html.escape(str(target_name))}</b>\n"
         f"Поріг AI: <b>{settings.min_publish_score}%</b>\n"
-        f"Часовий пояс планування: <b>{html.escape(settings.publish_timezone)}</b>\n\n"
+        f"Часовий пояс: <b>{html.escape(settings.publish_timezone)}</b>\n\n"
         "У ручному режимі перед публікацією бот показує фінальне прев’ю. "
-        "Зміни режимів застосовуються до нових готових постів.",
+        "Режими, промти та канали зберігаються окремо для кожного користувача.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(publish_label, callback_data=f"set_publish_mode:{'manual' if publish_mode == 'auto' else 'auto'}")],
             [InlineKeyboardButton(photo_label, callback_data=f"set_photo_mode:{'manual' if photo_mode == 'auto' else 'auto'}")],
             [InlineKeyboardButton("🧠 AI / Фото / Шаблони", callback_data="ai_settings")],
+            [InlineKeyboardButton("📺 Мої канали", callback_data="channels_menu")],
             [InlineKeyboardButton(pause_label, callback_data="publish_ui_toggle_pause")],
             [InlineKeyboardButton("📅 Заплановані", callback_data="scheduled_list"), InlineKeyboardButton("✅ Готові пости", callback_data="queue")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu")],
@@ -112,15 +118,17 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raise ApplicationHandlerStop
 
 
-async def _send_preview(context: ContextTypes.DEFAULT_TYPE, row: dict) -> None:
-    chat_id = settings.admin_user_id
+async def _send_preview(context: ContextTypes.DEFAULT_TYPE, row: dict, chat_id: int) -> None:
     text = post_html(row.get("rewritten_text") or "")
     buttons = _preview_buttons(row["id"])
+    target = await get_default_target(int(row.get("user_id") or chat_id))
+    target_name = (target or {}).get("title") or (target or {}).get("channel_ref") or "не налаштовано"
 
     await context.bot.send_message(
         chat_id,
         f"👁 <b>Фінальне прев’ю поста #{row['id']}</b>\n"
-        "Нижче він виглядає так само, як буде виглядати в каналі.",
+        f"📺 Канал: <b>{html.escape(str(target_name))}</b>\n\n"
+        "Нижче пост виглядає так, як буде виглядати в каналі.",
         parse_mode="HTML",
     )
 
@@ -157,6 +165,7 @@ async def publish_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
     q = update.callback_query
     data = q.data or ""
     await q.answer()
+    chat_id = q.from_user.id
 
     if data.startswith("publish:"):
         news_id = int(data.split(":", 1)[1])
@@ -164,7 +173,7 @@ async def publish_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if not row or not row.get("rewritten_text"):
             await q.answer("Пост не знайдено", show_alert=True)
             raise ApplicationHandlerStop
-        await _send_preview(context, row)
+        await _send_preview(context, row, chat_id)
         raise ApplicationHandlerStop
 
     if data.startswith("publish_now:"):
@@ -173,14 +182,23 @@ async def publish_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if not row or not row.get("rewritten_text"):
             await q.answer("Пост не знайдено", show_alert=True)
             raise ApplicationHandlerStop
-        await publish_row(context.bot, row)
-        await update_news(news_id, status="published", published_at=utc_now_db(), scheduled_at=None)
+        try:
+            await publish_row(context.bot, row)
+            await update_news(news_id, status="published", published_at=utc_now_db(), scheduled_at=None)
+        except Exception as exc:
+            await context.bot.send_message(
+                chat_id,
+                f"🔴 <b>Не вдалося опублікувати пост #{news_id}</b>\n"
+                f"<code>{html.escape(type(exc).__name__ + ': ' + str(exc)[:900])}</code>",
+                parse_mode="HTML",
+            )
+            raise ApplicationHandlerStop
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
         await context.bot.send_message(
-            settings.admin_user_id,
+            chat_id,
             f"✅ <b>Пост #{news_id} опубліковано зараз</b>",
             parse_mode="HTML",
         )
@@ -192,9 +210,13 @@ async def publish_flow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if not row:
             await q.answer("Пост не знайдено", show_alert=True)
             raise ApplicationHandlerStop
+        target = await get_default_target(chat_id)
+        if not target:
+            await q.answer("Спочатку додай канал публікації", show_alert=True)
+            raise ApplicationHandlerStop
         context.user_data["scheduling_news_id"] = news_id
         await context.bot.send_message(
-            settings.admin_user_id,
+            chat_id,
             f"📅 <b>Планування поста #{news_id}</b>\n\n"
             f"Надішли дату й час у форматі:\n<code>21.08.2026 18:30</code>\n\n"
             f"Часовий пояс: <b>{html.escape(settings.publish_timezone)}</b>",
@@ -288,20 +310,22 @@ async def scheduled_publish_worker(app: Application) -> None:
         try:
             rows = await get_due_scheduled(utc_now_db(), 20)
             for row in rows:
+                user_id = int(row.get("user_id") or settings.admin_user_id or 0)
                 try:
                     await publish_row(app.bot, row)
+                    # No Telegram update context here: update by ID globally.
                     await update_news(row["id"], status="published", published_at=utc_now_db(), scheduled_at=None)
-                    if settings.admin_user_id:
+                    if user_id:
                         await app.bot.send_message(
-                            settings.admin_user_id,
+                            user_id,
                             f"✅ <b>Запланований пост #{row['id']} опубліковано</b>",
                             parse_mode="HTML",
                         )
                 except Exception as exc:
-                    log.exception("Scheduled publish failed news_id=%s", row.get("id"))
-                    if settings.admin_user_id:
+                    log.exception("Scheduled publish failed news_id=%s user_id=%s", row.get("id"), user_id)
+                    if user_id:
                         await app.bot.send_message(
-                            settings.admin_user_id,
+                            user_id,
                             f"🔴 <b>Не вдалося опублікувати запланований пост #{row.get('id')}</b>\n"
                             f"<code>{html.escape(type(exc).__name__ + ': ' + str(exc)[:800])}</code>",
                             parse_mode="HTML",
