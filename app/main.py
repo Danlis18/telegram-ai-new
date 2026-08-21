@@ -19,6 +19,7 @@ from app.ai_editor import is_advertising_post, rewrite_news
 from app.config import settings
 from app.database import get_setting, init_db, save, seen, set_setting, update_news
 from app.formatting import post_html
+from app.publishing import get_photo_edit_mode, get_publish_mode, process_ready_automation
 from app.sources import SOURCES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -131,7 +132,7 @@ def action_buttons(news_id: int, media_type: str | None = None) -> InlineKeyboar
         InlineKeyboardButton("✍️ Інший текст", callback_data=f"regen:{news_id}"),
     ]]
     if media_type == "photo":
-        rows.append([InlineKeyboardButton("🖼 Перегенерувати фото", callback_data=f"regen_image:{news_id}")])
+        rows.append([InlineKeyboardButton("🧹 Відредагувати фото", callback_data=f"regen_image:{news_id}")])
     rows.extend([
         [
             InlineKeyboardButton("👁 Оригінал", callback_data=f"original:{news_id}"),
@@ -231,9 +232,29 @@ async def process_message(event, source: str, *, backfill: bool = False, push_re
                 await update_news(news_id, status="skipped")
                 log.info("Skipped ready post @%s #%s: photo capture failed", source, event.id)
                 return
+
+            automation = await process_ready_automation(publisher, news_id)
+            if automation.get("published"):
+                await notify_admin(
+                    f"🤖 <b>Пост #{news_id} опубліковано автоматично</b>\n"
+                    f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>\n"
+                    f"🖼 Фото: <b>{'автооброблено' if automation.get('photo_edited') else 'без автообробки'}</b>"
+                )
+                return
+
+            photo_error = automation.get("photo_error")
+            photo_line = ""
+            if automation.get("photo_edited"):
+                photo_line = "\n🖼 Автообробка фото: <b>✅ готово</b>"
+            elif photo_error:
+                photo_line = (
+                    "\n🖼 Автообробка фото: <b>🔴 помилка</b>\n"
+                    f"<code>{html.escape(str(photo_error)[:700])}</code>"
+                )
+
             await notify_admin(
                 f"✅ <b>Готовий пост #{news_id}</b>\n"
-                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>\n\n"
+                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>{photo_line}\n\n"
                 f"{post_html(rewritten)}",
                 action_buttons(news_id, media_type),
             )
@@ -283,13 +304,24 @@ async def main():
         await reader.start()
         me = await reader.get_me()
         joined_now, missing = await sync_sources()
-        log.info("Reader authorized as %s; active sources=%d/%d; auto_publish=%s; admin_bot=online", me.id, len(ACTIVE_SOURCE_IDS), len(SOURCES), settings.auto_publish)
+        publish_mode = await get_publish_mode()
+        photo_mode = await get_photo_edit_mode()
+        log.info(
+            "Reader authorized as %s; active sources=%d/%d; publish_mode=%s; photo_edit_mode=%s; admin_bot=online",
+            me.id,
+            len(ACTIVE_SOURCE_IDS),
+            len(SOURCES),
+            publish_mode,
+            photo_mode,
+        )
         await notify_admin(
             "🟢 <b>SPORTS NEWS CONTROL</b>\n\n"
             f"Reader: <b>ONLINE</b>\n"
             f"Активні джерела: <b>{len(ACTIVE_SOURCE_IDS)}/{len(SOURCES)}</b>\n"
-            f"Недоступних: <b>{len(missing)}</b>\n\n"
-            "У роботу беруться тільки пости з фото. Повідомлення без фото одразу пропускаються."
+            f"Недоступних: <b>{len(missing)}</b>\n"
+            f"Публікація: <b>{'АВТО' if publish_mode == 'auto' else 'РУЧНА'}</b>\n"
+            f"Обробка фото: <b>{'АВТО' if photo_mode == 'auto' else 'РУЧНА'}</b>\n\n"
+            "У роботу беруться тільки пости з фото. Режими можна перемикати в ⚙️ Керування."
         )
         asyncio.create_task(backfill_recent())
         await reader.run_until_disconnected()
