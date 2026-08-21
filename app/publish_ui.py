@@ -25,6 +25,7 @@ from app.database import (
 )
 from app.formatting import post_html
 from app.publishing import get_photo_edit_mode, get_publish_mode, publish_row, utc_now_db
+from app.settings_ui import register_settings_ui
 
 log = logging.getLogger("telegram-ai-news.publish-ui")
 
@@ -71,6 +72,7 @@ async def show_control_panel(query) -> None:
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(publish_label, callback_data=f"set_publish_mode:{'manual' if publish_mode == 'auto' else 'auto'}")],
             [InlineKeyboardButton(photo_label, callback_data=f"set_photo_mode:{'manual' if photo_mode == 'auto' else 'auto'}")],
+            [InlineKeyboardButton("🧠 AI / Фото / Шаблони", callback_data="ai_settings")],
             [InlineKeyboardButton(pause_label, callback_data="publish_ui_toggle_pause")],
             [InlineKeyboardButton("📅 Заплановані", callback_data="scheduled_list"), InlineKeyboardButton("✅ Готові пости", callback_data="queue")],
             [InlineKeyboardButton("🏠 Меню", callback_data="menu")],
@@ -312,6 +314,7 @@ async def scheduled_publish_worker(app: Application) -> None:
 
 
 def register_publish_ui(app: Application) -> None:
+    register_settings_ui(app)
     app.add_handler(CallbackQueryHandler(control_callback, pattern=r"^control$"), group=-1)
     app.add_handler(CallbackQueryHandler(mode_callback, pattern=r"^(set_publish_mode:|set_photo_mode:|publish_ui_toggle_pause$)"), group=-1)
     app.add_handler(CallbackQueryHandler(publish_flow_callback, pattern=r"^(publish:|publish_now:|schedule:|preview_close:)"), group=-1)
