@@ -48,7 +48,8 @@ if railway_volume and settings.database_path == "data/news.db":
 # python-telegram-bot processes updates sequentially by default. In this project
 # long image-generation callbacks must not block text edits, navigation or a
 # second image generation. Configure every ApplicationBuilder created after
-# this module is imported to process several updates concurrently.
+# this module is imported to process several updates concurrently and install
+# the multi-user workspace layer on the resulting Application.
 def _enable_concurrent_telegram_updates() -> None:
     try:
         from telegram.ext import ApplicationBuilder
@@ -60,7 +61,16 @@ def _enable_concurrent_telegram_updates() -> None:
 
         def concurrent_build(builder):
             builder.concurrent_updates(max(2, settings.telegram_concurrent_updates))
-            return original_build(builder)
+            app = original_build(builder)
+            try:
+                from app.bootstrap import install_application
+
+                install_application(app)
+            except Exception:
+                # Keep deployment alive even if an optional UI layer fails to load;
+                # the core bot will still expose its original handlers.
+                pass
+            return app
 
         ApplicationBuilder.build = concurrent_build
         ApplicationBuilder._sports_news_concurrency_patch = True
