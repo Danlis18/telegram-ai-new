@@ -10,7 +10,12 @@ from openai import AsyncOpenAI
 from PIL import Image, ImageFile, UnidentifiedImageError
 
 from app.config import settings
-from app.database import get_style_examples
+from app.database import (
+    get_custom_template,
+    get_setting,
+    get_style_examples,
+    increment_generation_stat,
+)
 from app.image_templates import DEFAULT_IMAGE_TEMPLATE, get_template
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -117,6 +122,17 @@ def _headline_body_overlap(text: str) -> float:
     return len(headline_words & body_words) / max(1, min(len(headline_words), len(body_words)))
 
 
+async def _owner_text_rules() -> str:
+    text_prompt = (await get_setting("text_prompt_custom", "") or "").strip()
+    emoji_prompt = (await get_setting("emoji_prompt_custom", "") or "").strip()
+    parts = []
+    if text_prompt:
+        parts.append("\n\nДОДАТКОВИЙ ПРОМТ ВЛАСНИКА ДЛЯ ТЕКСТУ:\n" + text_prompt)
+    if emoji_prompt:
+        parts.append("\n\nДОДАТКОВІ ПРАВИЛА ВЛАСНИКА ДЛЯ EMOJI:\n" + emoji_prompt)
+    return "".join(parts)
+
+
 async def _request_rewrite(clean_text: str, source: str, examples: list[dict], extra_instruction: str = "") -> dict:
     response = await client.responses.create(
         model=settings.openai_model,
@@ -134,18 +150,24 @@ async def _request_rewrite(clean_text: str, source: str, examples: list[dict], e
 async def rewrite_news(text: str, source: str) -> dict:
     clean_text = sanitize_source_text(text)
     examples = await get_style_examples(6)
-    result = await _request_rewrite(clean_text, source, examples)
-    result["text"] = sanitize_source_text((result.get("text") or "").strip())
-    if result.get("publish") and _headline_body_overlap(result["text"]) >= 0.62:
-        retry = await _request_rewrite(
-            clean_text,
-            source,
-            examples,
-            "\n\nВАЖЛИВА ПОВТОРНА ПРАВКА: попередній варіант повторив зміст хука у другому абзаці. Перепиши пост так, щоб другий абзац одразу давав нову деталь із джерела.",
-        )
-        retry["text"] = sanitize_source_text((retry.get("text") or "").strip())
-        result = retry
-    return result
+    owner_rules = await _owner_text_rules()
+    try:
+        result = await _request_rewrite(clean_text, source, examples, owner_rules)
+        result["text"] = sanitize_source_text((result.get("text") or "").strip())
+        if result.get("publish") and _headline_body_overlap(result["text"]) >= 0.62:
+            retry = await _request_rewrite(
+                clean_text,
+                source,
+                examples,
+                owner_rules + "\n\nВАЖЛИВА ПОВТОРНА ПРАВКА: попередній варіант повторив зміст хука у другому абзаці. Перепиши пост так, щоб другий абзац одразу давав нову деталь із джерела.",
+            )
+            retry["text"] = sanitize_source_text((retry.get("text") or "").strip())
+            result = retry
+        await increment_generation_stat("text_generations")
+        return result
+    except Exception:
+        await increment_generation_stat("text_errors")
+        raise
 
 
 def _open_image_bytes(image_bytes: bytes, label: str) -> Image.Image:
@@ -189,20 +211,54 @@ def _image_data_url(image_bytes: bytes) -> str:
     return f"data:image/jpeg;base64,{base64.b64encode(normalized).decode('ascii')}"
 
 
-def _load_logo() -> Image.Image:
+def _cover_resize(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+    target_w, target_h = size
+    ratio = max(target_w / image.width, target_h / image.height)
+    resized = image.resize((max(1, int(image.width * ratio)), max(1, int(image.height * ratio))), Image.Resampling.LANCZOS)
+    left = max(0, (resized.width - target_w) // 2)
+    top = max(0, (resized.height - target_h) // 2)
+    return resized.crop((left, top, left + target_w, top + target_h))
+
+
+async def _apply_selected_template(image_bytes: bytes) -> bytes:
+    if (await get_setting("template_mode", "off") or "off").lower() != "on":
+        return image_bytes
+    selected = (await get_setting("selected_template_id", "") or "").strip()
+    if not selected.isdigit():
+        return image_bytes
+    row = await get_custom_template(int(selected))
+    if not row or not row.get("image_blob"):
+        return image_bytes
+    try:
+        overlay = _open_image_bytes(bytes(row["image_blob"]), "CUSTOM_TEMPLATE").convert("RGBA")
+        base = _open_image_bytes(image_bytes, "TEMPLATE_SOURCE").convert("RGBA")
+        base = _cover_resize(base, overlay.size)
+        composed = Image.alpha_composite(base, overlay)
+        out = BytesIO()
+        composed.convert("RGB").save(out, format="JPEG", quality=96, optimize=True)
+        return out.getvalue()
+    except Exception:
+        log.exception("Custom template application failed template_id=%s", selected)
+        return image_bytes
+
+
+async def _resolve_logo_bytes() -> bytes:
+    custom = (await get_setting("sports_news_logo_b64", "") or "").strip()
+    if custom:
+        try:
+            data = base64.b64decode(custom)
+            _open_image_bytes(data, "CUSTOM_LOGO")
+            return data
+        except Exception:
+            log.exception("Stored custom logo is invalid; falling back to bundled logo")
     if not LOGO_PATH.exists():
         raise RuntimeError(f"SPORTS_NEWS_LOGO_MISSING: {LOGO_PATH}")
-    try:
-        logo = Image.open(LOGO_PATH)
-        logo.load()
-        return logo.convert("RGBA")
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
-        raise RuntimeError(f"SPORTS_NEWS_LOGO_INVALID: {type(exc).__name__}: {exc}") from exc
+    return LOGO_PATH.read_bytes()
 
 
-def _add_sports_news_logo(image_bytes: bytes) -> bytes:
+def _add_sports_news_logo(image_bytes: bytes, logo_bytes: bytes) -> bytes:
     image = _open_image_bytes(image_bytes, "WORKING_IMAGE").convert("RGBA")
-    logo = _load_logo()
+    logo = _open_image_bytes(logo_bytes, "SPORTS_NEWS_LOGO").convert("RGBA")
     width, height = image.size
     base = min(width, height)
     target_w = max(88, int(base * 0.145))
@@ -217,47 +273,17 @@ def _add_sports_news_logo(image_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+async def _finalize_image(image_bytes: bytes) -> bytes:
+    working = await _apply_selected_template(image_bytes)
+    logo_bytes = await _resolve_logo_bytes()
+    return _add_sports_news_logo(working, logo_bytes)
+
+
 def _effective_image_model() -> str:
     configured = (settings.openai_image_model or "").strip()
     if not configured or configured == "gpt-image-1":
         return "gpt-image-2"
     return configured
-
-
-async def _source_needs_cleanup(source_image: bytes) -> bool:
-    try:
-        response = await client.responses.create(
-            model=settings.openai_model,
-            input=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "Inspect this sports image and answer with exactly one word: CLEAN or EDIT. "
-                            "Return EDIT if there is ANY added/overlaid graphic content that is not part of the natural photographed scene and should be removed before reposting. "
-                            "That includes ALL overlaid headlines, captions, quotes, scores, dates, player names, lists, numbers, arrows, graphic labels, channel names, media logos, watermarks, bookmaker/casino/betting marks, sponsor blocks, promo badges and other added text or branding. "
-                            "Return CLEAN only for a normal clean sports photograph with no added text, no added graphic labels, no watermarks and no foreign overlaid branding. "
-                            "Do NOT treat natural physical details as overlays: keep club/team crests printed on the kit, jersey numbers, kit manufacturer marks, sponsors physically printed on clothing, tattoos, stadium signs and other details that genuinely exist in the photographed scene. "
-                            "If you are uncertain whether something is an overlay, return EDIT."
-                        ),
-                    },
-                    {"type": "input_image", "image_url": _image_data_url(source_image)},
-                ],
-            }],
-        )
-        verdict = response.output_text.strip().upper()
-        log.info("Image cleanup classifier verdict=%s", verdict[:80])
-        if verdict.startswith("EDIT"):
-            return True
-        if verdict.startswith("CLEAN"):
-            return False
-        raise RuntimeError(f"CLEANUP_CLASSIFIER_BAD_RESPONSE: {verdict[:200]}")
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        log.exception("Cleanup classifier failed")
-        raise RuntimeError(f"CLEANUP_CLASSIFIER_FAILED: {type(exc).__name__}: {exc}") from exc
 
 
 async def _image_result_bytes(item) -> bytes | None:
@@ -292,15 +318,12 @@ def _restore_source_dimensions(edited_bytes: bytes, source_image: bytes) -> byte
 async def generate_news_image(news_text: str, *, source_image: bytes | None = None, template_key: str = DEFAULT_IMAGE_TEMPLATE) -> bytes:
     clean_context = re.sub(r"<[^>]+>", " ", news_text)[:1000]
     image_model = _effective_image_model()
+    owner_image_prompt = (await get_setting("image_prompt_custom", "") or "").strip()
+    owner_rules = f" Additional owner instructions: {owner_image_prompt}" if owner_image_prompt else ""
 
     if source_image:
         source_image = _normalize_to_jpeg(source_image, "SOURCE_IMAGE")
-
-        # Manual image editing is explicit user intent. Do not gate it behind the
-        # vision classifier: the direct /testedit proved images.edit works, while
-        # classifier false-CLEAN verdicts were skipping the edit entirely.
-        log.info("Image edit path: forced manual edit model=%s", image_model)
-
+        log.info("Image edit path: forced manual/automatic edit model=%s", image_model)
         image_file = BytesIO(source_image)
         image_file.name = "source.jpg"
         try:
@@ -316,27 +339,31 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
                     "Do not redesign, restyle, recolor, relight, beautify, sharpen, change anatomy or invent a different person. "
                     "Keep natural physical details that are genuinely part of the photographed scene, including club crests and jersey details printed on clothing, tattoos and real stadium elements. "
                     "Do not add any new text or branding. The final result must look like the clean original photograph before any poster text or graphic overlay was added. "
-                    f"News context is for identification only and must NOT be rendered as text: {clean_context}"
+                    f"News context is for identification only and must NOT be rendered as text: {clean_context}."
+                    + owner_rules
                 ),
             )
         except Exception as exc:
+            await increment_generation_stat("image_errors")
             log.exception("Image edit API failed model=%s", image_model)
             raise RuntimeError(f"IMAGE_EDIT_API_FAILED[{image_model}]: {type(exc).__name__}: {exc}") from exc
 
         if not result.data:
+            await increment_generation_stat("image_errors")
             raise RuntimeError(f"IMAGE_EDIT_EMPTY_RESULT[{image_model}]")
-
         edited_bytes = await _image_result_bytes(result.data[0])
         if not edited_bytes:
+            await increment_generation_stat("image_errors")
             raise RuntimeError(f"IMAGE_EDIT_RESULT_HAS_NO_IMAGE[{image_model}]")
-
         try:
             working = _restore_source_dimensions(edited_bytes, source_image)
         except Exception as exc:
+            await increment_generation_stat("image_errors")
             log.exception("Edited image validation failed")
             raise RuntimeError(f"IMAGE_EDIT_INVALID_RESULT: {type(exc).__name__}: {exc}") from exc
 
-        return _add_sports_news_logo(working)
+        await increment_generation_stat("image_edits")
+        return await _finalize_image(working)
 
     selected_key, template = get_template(template_key, news_text)
     try:
@@ -347,16 +374,20 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
                 "No foreign media/channel/bookmaker/casino branding. No artificial text. "
                 "Natural saturated colors, realistic skin, anatomy, clothing, lighting and shadows. "
                 f"Composition reference: {selected_key}. {template['prompt']} "
-                f"News context: {clean_context}"
+                f"News context: {clean_context}."
+                + owner_rules
             ),
             size="1536x1024",
         )
     except Exception as exc:
+        await increment_generation_stat("image_errors")
         log.exception("Image generation API failed model=%s", image_model)
         raise RuntimeError(f"IMAGE_GENERATE_API_FAILED[{image_model}]: {type(exc).__name__}: {exc}") from exc
 
     if result.data:
         generated = await _image_result_bytes(result.data[0])
         if generated:
-            return _add_sports_news_logo(_to_four_three(generated))
+            await increment_generation_stat("image_generations")
+            return await _finalize_image(_to_four_three(generated))
+    await increment_generation_stat("image_errors")
     raise RuntimeError(f"IMAGE_API_EMPTY_RESULT[{image_model}]")
