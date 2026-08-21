@@ -17,10 +17,21 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from app.admin_bot import start_admin_bot, stop_admin_bot
 from app.ai_editor import is_advertising_post, rewrite_news
 from app.config import settings
-from app.database import get_setting, init_db, save, seen, set_setting, update_news
+from app.database import (
+    get_setting,
+    get_source_subscribers,
+    init_db,
+    list_all_active_source_usernames,
+    save,
+    seed_owner_workspace,
+    seen,
+    set_setting,
+    update_news,
+)
 from app.formatting import post_html
 from app.publishing import get_photo_edit_mode, get_publish_mode, process_ready_automation
 from app.sources import SOURCES
+from app.tenant import user_scope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("telegram-ai-news")
@@ -59,23 +70,21 @@ reader = build_reader()
 publisher = Bot(settings.telegram_bot_token)
 
 
-async def notify_admin(text: str, reply_markup=None) -> None:
-    if not settings.admin_user_id:
-        log.warning("ADMIN_USER_ID is not configured; admin notification skipped")
-        return
+async def notify_user(user_id: int, text: str, reply_markup=None) -> None:
     try:
         await publisher.send_message(
-            settings.admin_user_id,
+            int(user_id),
             text,
             parse_mode="HTML",
             reply_markup=reply_markup,
             disable_web_page_preview=True,
         )
     except Exception:
-        log.exception("Failed to send admin notification")
+        log.exception("Failed to send notification to user_id=%s", user_id)
 
 
 async def sync_sources() -> tuple[int, list[str]]:
+    wanted_sources = await list_all_active_source_usernames()
     ACTIVE_SOURCE_IDS.clear()
     joined_by_username: dict[str, tuple[int, str]] = {}
     async for dialog in reader.iter_dialogs():
@@ -86,7 +95,7 @@ async def sync_sources() -> tuple[int, list[str]]:
 
     missing: list[str] = []
     joined_now = 0
-    for source in SOURCES:
+    for source in wanted_sources:
         cached = joined_by_username.get(source.lower())
         if cached:
             chat_id, canonical = cached
@@ -98,7 +107,7 @@ async def sync_sources() -> tuple[int, list[str]]:
                 await reader(JoinChannelRequest(entity))
                 joined_now += 1
                 log.info("Joined source @%s", source)
-                await asyncio.sleep(4)
+                await asyncio.sleep(3)
             except UserAlreadyParticipantError:
                 pass
             except FloodWaitError as exc:
@@ -116,13 +125,21 @@ async def sync_sources() -> tuple[int, list[str]]:
             missing.append(source)
 
     resolved_names = {name.lower() for name in ACTIVE_SOURCE_IDS.values()}
-    for source in SOURCES:
+    for source in wanted_sources:
         if source.lower() not in resolved_names and source not in missing:
             missing.append(source)
 
+    # These two values are global service diagnostics. User-specific source lists
+    # live in user_sources and are shown by the workspace UI.
     await set_setting("active_sources", str(len(ACTIVE_SOURCE_IDS)))
     await set_setting("missing_sources", ",".join(missing))
-    log.info("Source audit complete: active=%d/%d, joined_now=%d, missing=%d", len(ACTIVE_SOURCE_IDS), len(SOURCES), joined_now, len(missing))
+    log.info(
+        "Source audit complete: active=%d/%d, joined_now=%d, missing=%d",
+        len(ACTIVE_SOURCE_IDS),
+        len(wanted_sources),
+        joined_now,
+        len(missing),
+    )
     return joined_now, missing
 
 
@@ -143,7 +160,7 @@ def action_buttons(news_id: int, media_type: str | None = None) -> InlineKeyboar
     return InlineKeyboardMarkup(rows)
 
 
-async def capture_media(event, news_id: int) -> str | None:
+async def capture_media(event, news_id: int, user_id: int) -> str | None:
     message = getattr(event, "message", event)
     if not getattr(message, "photo", None):
         return None
@@ -158,7 +175,7 @@ async def capture_media(event, news_id: int) -> str | None:
 
         with open(path, "rb") as fh:
             sent = await publisher.send_photo(
-                settings.admin_user_id,
+                int(user_id),
                 photo=fh,
                 caption="🖼 <b>Оригінальне фото з джерела</b>",
                 parse_mode="HTML",
@@ -173,7 +190,7 @@ async def capture_media(event, news_id: int) -> str | None:
         )
         return "photo"
     except Exception:
-        log.exception("Failed to capture photo for news_id=%s", news_id)
+        log.exception("Failed to capture photo for news_id=%s user_id=%s", news_id, user_id)
         return None
     finally:
         if path:
@@ -183,84 +200,108 @@ async def capture_media(event, news_id: int) -> str | None:
                 pass
 
 
-async def process_message(event, source: str, *, backfill: bool = False, push_ready: bool = True) -> None:
-    if (await get_setting("processing_paused", "false")) == "true":
-        return
-
-    message = getattr(event, "message", event)
-    if not getattr(message, "photo", None):
-        log.info("Skipped @%s #%s: no photo", source, event.id)
-        return
-
-    text = (event.raw_text or "").strip()
-    stored_original = text or f"[PHOTO_ONLY] @{source} #{event.id}"
-    if await seen(stored_original):
-        log.info("Skipped @%s #%s: exact duplicate", source, event.id)
-        return
-
-    if len(text) < 25:
-        await save(source, event.id, stored_original, "", 0, "raw")
-        log.info("Skipped @%s #%s: no/short caption", source, event.id)
-        return
-
-    advertising, ad_reason = is_advertising_post(text)
-    if advertising:
-        await save(source, event.id, stored_original, "", 0, "advertising")
-        log.info("Filtered advertising @%s #%s: %s", source, event.id, ad_reason)
-        return
-
-    news_id = await save(source, event.id, stored_original, "", 0, "received")
-    if not news_id:
-        return
-
-    try:
-        result = await rewrite_news(text, source)
-        score = int(result.get("score", 0))
-        rewritten = (result.get("text") or "").strip()
-        reason = (result.get("reason") or "").strip()
-        publishable = bool(result.get("publish")) and score >= settings.min_publish_score and bool(rewritten)
-        status = "ready" if publishable else "rejected"
-        await update_news(news_id, rewritten_text=rewritten, score=score, status=status)
-        log.info("Processed @%s #%s score=%s status=%s news_id=%s reason=%s", source, event.id, score, status, news_id, reason[:200])
-
-        if status != "ready":
+async def process_message(
+    event,
+    source: str,
+    user_id: int,
+    *,
+    backfill: bool = False,
+    push_ready: bool = True,
+) -> None:
+    with user_scope(user_id):
+        if (await get_setting("processing_paused", "false")) == "true":
             return
 
-        if push_ready:
-            media_type = await capture_media(event, news_id)
-            if media_type != "photo":
-                await update_news(news_id, status="skipped")
-                log.info("Skipped ready post @%s #%s: photo capture failed", source, event.id)
-                return
+        message = getattr(event, "message", event)
+        if not getattr(message, "photo", None):
+            log.info("Skipped @%s #%s for user=%s: no photo", source, event.id, user_id)
+            return
 
-            automation = await process_ready_automation(publisher, news_id)
-            if automation.get("published"):
-                await notify_admin(
-                    f"🤖 <b>Пост #{news_id} опубліковано автоматично</b>\n"
-                    f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>\n"
-                    f"🖼 Фото: <b>{'автооброблено' if automation.get('photo_edited') else 'без автообробки'}</b>"
-                )
-                return
+        text = (event.raw_text or "").strip()
+        stored_original = text or f"[PHOTO_ONLY] @{source} #{event.id}"
+        if await seen(stored_original):
+            log.info("Skipped @%s #%s for user=%s: exact duplicate", source, event.id, user_id)
+            return
 
-            photo_error = automation.get("photo_error")
-            photo_line = ""
-            if automation.get("photo_edited"):
-                photo_line = "\n🖼 Автообробка фото: <b>✅ готово</b>"
-            elif photo_error:
-                photo_line = (
-                    "\n🖼 Автообробка фото: <b>🔴 помилка</b>\n"
-                    f"<code>{html.escape(str(photo_error)[:700])}</code>"
-                )
+        if len(text) < 25:
+            await save(source, event.id, stored_original, "", 0, "raw")
+            log.info("Skipped @%s #%s for user=%s: no/short caption", source, event.id, user_id)
+            return
 
-            await notify_admin(
-                f"✅ <b>Готовий пост #{news_id}</b>\n"
-                f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>{photo_line}\n\n"
-                f"{post_html(rewritten)}",
-                action_buttons(news_id, media_type),
+        advertising, ad_reason = is_advertising_post(text)
+        if advertising:
+            await save(source, event.id, stored_original, "", 0, "advertising")
+            log.info("Filtered advertising @%s #%s user=%s: %s", source, event.id, user_id, ad_reason)
+            return
+
+        news_id = await save(source, event.id, stored_original, "", 0, "received")
+        if not news_id:
+            return
+
+        try:
+            result = await rewrite_news(text, source)
+            score = int(result.get("score", 0))
+            rewritten = (result.get("text") or "").strip()
+            reason = (result.get("reason") or "").strip()
+            publishable = bool(result.get("publish")) and score >= settings.min_publish_score and bool(rewritten)
+            status = "ready" if publishable else "rejected"
+            await update_news(news_id, rewritten_text=rewritten, score=score, status=status)
+            log.info(
+                "Processed @%s #%s user=%s score=%s status=%s news_id=%s reason=%s",
+                source,
+                event.id,
+                user_id,
+                score,
+                status,
+                news_id,
+                reason[:200],
             )
-    except Exception:
-        await update_news(news_id, status="ai_error")
-        log.exception("AI failed for @%s #%s news_id=%s", source, event.id, news_id)
+
+            if status != "ready":
+                return
+
+            if push_ready:
+                media_type = await capture_media(event, news_id, user_id)
+                if media_type != "photo":
+                    await update_news(news_id, status="skipped")
+                    log.info("Skipped ready post @%s #%s user=%s: photo capture failed", source, event.id, user_id)
+                    return
+
+                automation = await process_ready_automation(publisher, news_id, user_id)
+                if automation.get("published"):
+                    await notify_user(
+                        user_id,
+                        f"🤖 <b>Пост #{news_id} опубліковано автоматично</b>\n"
+                        f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>\n"
+                        f"🖼 Фото: <b>{'автооброблено' if automation.get('photo_edited') else 'без автообробки'}</b>",
+                    )
+                    return
+
+                details = []
+                if automation.get("photo_edited"):
+                    details.append("🖼 Автообробка фото: <b>✅ готово</b>")
+                if automation.get("photo_error"):
+                    details.append(
+                        "🖼 Автообробка фото: <b>🔴 помилка</b>\n"
+                        f"<code>{html.escape(str(automation['photo_error'])[:700])}</code>"
+                    )
+                if automation.get("publish_error"):
+                    details.append(
+                        "📺 Автопублікація: <b>🔴 не виконана</b>\n"
+                        f"<code>{html.escape(str(automation['publish_error'])[:700])}</code>"
+                    )
+                detail_text = ("\n" + "\n".join(details)) if details else ""
+
+                await notify_user(
+                    user_id,
+                    f"✅ <b>Готовий пост #{news_id}</b>\n"
+                    f"📡 @{html.escape(source)} · 🧠 <b>{score}%</b>{detail_text}\n\n"
+                    f"{post_html(rewritten)}",
+                    action_buttons(news_id, media_type),
+                )
+        except Exception:
+            await update_news(news_id, status="ai_error")
+            log.exception("AI failed for @%s #%s user=%s news_id=%s", source, event.id, user_id, news_id)
 
 
 @reader.on(events.NewMessage)
@@ -268,7 +309,9 @@ async def on_news(event):
     source = ACTIVE_SOURCE_IDS.get(event.chat_id)
     if not source:
         return
-    await process_message(event, source)
+    subscribers = await get_source_subscribers(source)
+    for user_id in subscribers:
+        await process_message(event, source, user_id)
 
 
 async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
@@ -276,56 +319,88 @@ async def backfill_recent(minutes: int = 90, limit_per_source: int = 3) -> int:
     processed = 0
     for chat_id, source in list(ACTIVE_SOURCE_IDS.items()):
         try:
+            subscribers = await get_source_subscribers(source)
+            if not subscribers:
+                continue
             messages = await reader.get_messages(chat_id, limit=limit_per_source)
             for message in reversed(messages):
                 if not message.date or message.date < cutoff:
                     continue
                 if not getattr(message, "photo", None):
                     continue
-                stored_original = (message.raw_text or "").strip() or f"[PHOTO_ONLY] @{source} #{message.id}"
-                if await seen(stored_original):
-                    continue
-                await process_message(message, source, backfill=True, push_ready=False)
-                processed += 1
+                for user_id in subscribers:
+                    stored_original = (message.raw_text or "").strip() or f"[PHOTO_ONLY] @{source} #{message.id}"
+                    with user_scope(user_id):
+                        if await seen(stored_original):
+                            continue
+                    await process_message(message, source, user_id, backfill=True, push_ready=False)
+                    processed += 1
             await asyncio.sleep(0.12)
         except FloodWaitError as exc:
             log.warning("FloodWait during backfill @%s: %ss", source, exc.seconds)
             break
         except Exception:
             log.exception("Backfill failed for @%s", source)
-    log.info("Backfill complete: processed_photo_candidates=%d", processed)
+    log.info("Backfill complete: processed_workspace_candidates=%d", processed)
     return processed
+
+
+async def source_sync_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(120)
+            await sync_sources()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Periodic source sync failed")
 
 
 async def main():
     await init_db()
+    await seed_owner_workspace(SOURCES, settings.target_channel)
     admin_app = await start_admin_bot()
+    sync_task = None
     try:
         await reader.start()
         me = await reader.get_me()
         joined_now, missing = await sync_sources()
-        publish_mode = await get_publish_mode()
-        photo_mode = await get_photo_edit_mode()
+        owner_id = int(settings.admin_user_id) if settings.admin_user_id else None
+        if owner_id:
+            with user_scope(owner_id):
+                publish_mode = await get_publish_mode()
+                photo_mode = await get_photo_edit_mode()
+        else:
+            publish_mode = "manual"
+            photo_mode = "manual"
         log.info(
-            "Reader authorized as %s; active sources=%d/%d; publish_mode=%s; photo_edit_mode=%s; admin_bot=online",
+            "Reader authorized as %s; active sources=%d; publish_mode(owner)=%s; photo_edit_mode(owner)=%s; admin_bot=online",
             me.id,
             len(ACTIVE_SOURCE_IDS),
-            len(SOURCES),
             publish_mode,
             photo_mode,
         )
-        await notify_admin(
-            "🟢 <b>SPORTS NEWS CONTROL</b>\n\n"
-            f"Reader: <b>ONLINE</b>\n"
-            f"Активні джерела: <b>{len(ACTIVE_SOURCE_IDS)}/{len(SOURCES)}</b>\n"
-            f"Недоступних: <b>{len(missing)}</b>\n"
-            f"Публікація: <b>{'АВТО' if publish_mode == 'auto' else 'РУЧНА'}</b>\n"
-            f"Обробка фото: <b>{'АВТО' if photo_mode == 'auto' else 'РУЧНА'}</b>\n\n"
-            "У роботу беруться тільки пости з фото. Режими можна перемикати в ⚙️ Керування."
-        )
+        if owner_id:
+            await notify_user(
+                owner_id,
+                "🟢 <b>SPORTS NEWS CONTROL</b>\n\n"
+                f"Reader: <b>ONLINE</b>\n"
+                f"Активних унікальних джерел: <b>{len(ACTIVE_SOURCE_IDS)}</b>\n"
+                f"Недоступних: <b>{len(missing)}</b>\n"
+                f"Нових при синхронізації: <b>{joined_now}</b>\n\n"
+                "👥 Multi-user workspace: <b>ONLINE</b>\n"
+                "Кожен користувач має власні джерела, канали, промти, шаблони, статистику та пости.",
+            )
         asyncio.create_task(backfill_recent())
+        sync_task = asyncio.create_task(source_sync_loop())
         await reader.run_until_disconnected()
     finally:
+        if sync_task:
+            sync_task.cancel()
+            try:
+                await sync_task
+            except asyncio.CancelledError:
+                pass
         await stop_admin_bot(admin_app)
 
 
