@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +27,14 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+# Railway containers are ephemeral between redeploys. If a Railway Volume is
+# mounted, transparently keep SQLite on that volume unless DATABASE_PATH was
+# explicitly overridden. This preserves post history, generation counters,
+# prompts, uploaded logos and templates across bot restarts/deploys.
+railway_volume = (os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()
+if railway_volume and settings.database_path == "data/news.db":
+    settings.database_path = str(Path(railway_volume) / "sports_news.db")
+
 
 # python-telegram-bot processes updates sequentially by default. In this project
 # long image-generation callbacks must not block text edits, navigation or a
@@ -45,10 +56,7 @@ def _enable_concurrent_telegram_updates() -> None:
         ApplicationBuilder.build = concurrent_build
         ApplicationBuilder._sports_news_concurrency_patch = True
     except Exception:
-        # The bot can still start sequentially if the installed PTB version ever
-        # changes; this avoids breaking deployment because of an optional tuning.
         pass
 
 
 _enable_concurrent_telegram_updates()
-
