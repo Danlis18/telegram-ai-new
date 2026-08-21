@@ -1,6 +1,8 @@
 import hashlib
 from pathlib import Path
+
 import aiosqlite
+
 from app.config import settings
 
 
@@ -30,6 +32,7 @@ async def init_db():
         await _ensure_column(db, "original_media_file_id", "TEXT")
         await _ensure_column(db, "scheduled_at", "DATETIME")
         await _ensure_column(db, "published_at", "DATETIME")
+
         await db.execute("""CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -40,6 +43,17 @@ async def init_db():
             original_text TEXT NOT NULL,
             ai_text TEXT NOT NULL,
             corrected_text TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS generation_stats (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL DEFAULT 0,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS custom_image_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            image_blob BLOB NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )""")
         await db.commit()
@@ -85,6 +99,59 @@ async def set_setting(key: str, value: str) -> None:
             "INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+        await db.commit()
+
+
+async def increment_generation_stat(key: str, amount: int = 1) -> None:
+    async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute(
+            """INSERT INTO generation_stats (key,value,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
+               ON CONFLICT(key) DO UPDATE SET value=value+excluded.value, updated_at=CURRENT_TIMESTAMP""",
+            (key, int(amount)),
+        )
+        await db.commit()
+
+
+async def get_generation_stats() -> dict[str, int]:
+    async with aiosqlite.connect(settings.database_path) as db:
+        cur = await db.execute("SELECT key,value FROM generation_stats")
+        return {str(row[0]): int(row[1]) for row in await cur.fetchall()}
+
+
+async def save_custom_template(name: str, image_bytes: bytes) -> int:
+    async with aiosqlite.connect(settings.database_path) as db:
+        cur = await db.execute(
+            "INSERT INTO custom_image_templates (name,image_blob) VALUES (?,?)",
+            (name.strip()[:120] or "Template", image_bytes),
+        )
+        await db.commit()
+        return int(cur.lastrowid)
+
+
+async def list_custom_templates(limit: int = 20) -> list[dict]:
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id,name,created_at FROM custom_image_templates ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(row) for row in await cur.fetchall()]
+
+
+async def get_custom_template(template_id: int) -> dict | None:
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id,name,image_blob,created_at FROM custom_image_templates WHERE id=?",
+            (template_id,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def delete_custom_template(template_id: int) -> None:
+    async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute("DELETE FROM custom_image_templates WHERE id=?", (template_id,))
         await db.commit()
 
 
