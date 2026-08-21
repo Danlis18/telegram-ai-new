@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     session_file_path: str = "data/telegram_reader.session"
     admin_user_id: int | None = None
     telegram_concurrent_updates: int = 8
+    publish_timezone: str = "Europe/Kyiv"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -50,3 +51,4 @@ def _enable_concurrent_telegram_updates() -> None:
 
 
 _enable_concurrent_telegram_updates()
+
