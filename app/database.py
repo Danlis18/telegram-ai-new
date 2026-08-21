@@ -28,6 +28,8 @@ async def init_db():
         await _ensure_column(db, "media_type", "TEXT")
         await _ensure_column(db, "media_file_id", "TEXT")
         await _ensure_column(db, "original_media_file_id", "TEXT")
+        await _ensure_column(db, "scheduled_at", "DATETIME")
+        await _ensure_column(db, "published_at", "DATETIME")
         await db.execute("""CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -96,7 +98,14 @@ async def get_news(news_id: int):
 
 async def update_news(news_id: int, **fields) -> None:
     allowed = {
-        "rewritten_text", "score", "status", "media_type", "media_file_id", "original_media_file_id"
+        "rewritten_text",
+        "score",
+        "status",
+        "media_type",
+        "media_file_id",
+        "original_media_file_id",
+        "scheduled_at",
+        "published_at",
     }
     items = [(k, v) for k, v in fields.items() if k in allowed]
     if not items:
@@ -142,6 +151,26 @@ async def get_queue(limit: int = 20):
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_scheduled(limit: int = 20):
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM news WHERE status='scheduled' AND scheduled_at IS NOT NULL ORDER BY scheduled_at ASC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_due_scheduled(now_utc: str, limit: int = 20):
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM news WHERE status='scheduled' AND scheduled_at IS NOT NULL AND scheduled_at<=? ORDER BY scheduled_at ASC LIMIT ?",
+            (now_utc, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_archive(limit: int = 15):
     async with aiosqlite.connect(settings.database_path) as db:
         db.row_factory = aiosqlite.Row
@@ -166,6 +195,7 @@ async def stats():
             "total": "1=1",
             "today": "date(created_at)=date('now')",
             "ready": "status='ready'",
+            "scheduled": "status='scheduled'",
             "published": "status='published'",
             "rejected": "status='rejected'",
             "skipped": "status='skipped'",
