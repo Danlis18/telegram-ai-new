@@ -27,6 +27,7 @@ from app.database import (
     update_news,
 )
 from app.formatting import post_html
+from app.publish_ui import register_publish_ui, start_publish_worker, stop_publish_worker
 from app.sources import SOURCES
 
 log = logging.getLogger("telegram-ai-news.admin-bot")
@@ -108,6 +109,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
     context.user_data.pop("editing_news_id", None)
+    context.user_data.pop("scheduling_news_id", None)
     await update.message.reply_text(
         "🏟 <b>SPORTS NEWS CONTROL</b>\n\n"
         "Сюди приходять тільки готові новини після повної AI-модерації.\n"
@@ -265,6 +267,7 @@ async def show_stats(query):
         f"📡 Активних джерел: <b>{active}/{len(SOURCES)}</b>\n"
         f"📥 Отримано сьогодні: <b>{s['today']}</b>\n"
         f"✅ Готово: <b>{s['ready']}</b>\n"
+        f"📅 Заплановано: <b>{s.get('scheduled', 0)}</b>\n"
         f"📤 Опубліковано: <b>{s['published']}</b>\n"
         f"🚫 Відхилено AI: <b>{s['rejected']}</b>\n"
         f"🛑 Відсіяно реклами: <b>{s['advertising']}</b>\n"
@@ -424,6 +427,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "menu":
         context.user_data.pop("editing_news_id", None)
+        context.user_data.pop("scheduling_news_id", None)
         await q.edit_message_text("🏟 <b>SPORTS NEWS CONTROL</b>\n\nОбери розділ:", parse_mode="HTML", reply_markup=main_menu())
     elif data == "queue":
         context.user_data.pop("editing_news_id", None)
@@ -442,9 +446,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• У бот приходять тільки готові пости.\n"
             "• ✏️ Редагувати текст — ручна правка стає прикладом стилю.\n"
             "• Реальні цитати оформлюються через Telegram blockquote.\n"
-            "• 🧹 Відредагувати фото — працює тільки з оригіналом: прибирає зайвий текст/рекламу/чужі бренди, не створює іншу фотографію.\n"
-            "• Якщо фото чисте, воно має залишитися без змін.\n"
-            "• Відео завжди лишається оригінальним.",
+            "• 🧹 Відредагувати фото — прибирає зайвий текст/рекламу/чужі бренди та додає SPORTS NEWS.\n"
+            "• У ручній публікації перед відправкою показується фінальне прев’ю.\n"
+            "• Публікацію можна виконати зараз або запланувати на дату й час.\n"
+            "• Автопостинг і автообробка фото перемикаються окремо в ⚙️ Керування.",
             parse_mode="HTML",
             reply_markup=main_menu(),
         )
@@ -542,7 +547,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent = await context.bot.send_photo(
                     settings.admin_user_id,
                     photo=buf,
-                    caption=f"✅ <b>Фото #{news_id} відредаговано</b>\nЯкщо очищення або накладання логотипа не вдалося, бот безпечно залишає оригінал.",
+                    caption=f"✅ <b>Фото #{news_id} відредаговано</b>",
                     parse_mode="HTML",
                 )
                 stage = "SAVE_FILE_ID"
@@ -584,6 +589,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=item_menu(row),
             )
     elif data.startswith("publish:"):
+        # Intercepted by publish_ui in handler group -1. This is retained only as
+        # a backwards-compatible fallback if that module is ever disabled.
         news_id = int(data.split(":", 1)[1])
         row = await get_news(news_id)
         if row and row.get("rewritten_text"):
@@ -595,6 +602,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_admin_bot() -> Application:
     app = Application.builder().token(settings.telegram_bot_token).concurrent_updates(8).build()
+    register_publish_ui(app)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
@@ -604,6 +612,7 @@ async def start_admin_bot() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_editor_text))
     await app.initialize()
     await app.start()
+    start_publish_worker(app)
     await app.updater.start_polling(drop_pending_updates=True)
     await app.bot.set_my_commands([
         ("start", "Відкрити SPORTS NEWS CONTROL"),
@@ -616,6 +625,7 @@ async def start_admin_bot() -> Application:
 
 
 async def stop_admin_bot(app: Application):
+    await stop_publish_worker(app)
     await app.updater.stop()
     await app.stop()
     await app.shutdown()
