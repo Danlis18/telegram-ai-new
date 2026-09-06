@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from app.content_policy import (
     candidate_matches_preferences,
     can_accept_candidate,
+    cooldown_state,
     current_period,
     finish_replacement_request,
     list_pending_replacements,
@@ -36,6 +37,7 @@ def _lock_for(user_id: int) -> asyncio.Lock:
 
 async def _policy_process(original, event, source: str, user_id: int, **kwargs):
     uid = int(user_id)
+    bypass_cooldown = bool(kwargs.pop("bypass_cooldown", False))
     async with _lock_for(uid):
         with user_scope(uid):
             allowed, period_key, count, quota = await can_accept_candidate(uid)
@@ -49,6 +51,19 @@ async def _policy_process(original, event, source: str, user_id: int, **kwargs):
                     quota,
                 )
                 return
+
+            if not bypass_cooldown:
+                cooldown = await cooldown_state(uid, period_key)
+                if not cooldown.get("allowed", True):
+                    log.info(
+                        "Cooldown gate skipped @%s user=%s period=%s remaining=%sm delay=%sm",
+                        source,
+                        uid,
+                        period_key,
+                        cooldown.get("remaining_minutes", 0),
+                        cooldown.get("delay_minutes", 0),
+                    )
+                    return
 
             message = getattr(event, "message", event)
             if not getattr(message, "photo", None):
@@ -106,7 +121,14 @@ async def _find_replacement(main_mod, request: dict) -> bool:
                 with user_scope(uid):
                     if await main_mod.seen(stored):
                         continue
-                await main_mod.process_message(message, source, uid, backfill=True, push_ready=True)
+                await main_mod.process_message(
+                    message,
+                    source,
+                    uid,
+                    backfill=True,
+                    push_ready=True,
+                    bypass_cooldown=True,
+                )
                 with user_scope(uid):
                     allowed_after, _, after_count, _ = await can_accept_candidate(uid)
                 if after_count > before_count or not allowed_after or after_count >= quota:
@@ -146,7 +168,7 @@ def install_reader_policy(app) -> None:
 
         main_mod.process_message = wrapped_process_message
         main_mod._quota_policy_wrapped = True
-        log.info("Installed per-user quota and rejection-learning reader policy")
+        log.info("Installed per-user quota, cooldown and rejection-learning reader policy")
 
     old = app.bot_data.get("replacement_worker_task")
     if not old or old.done():
