@@ -5,6 +5,7 @@ from telegram.ext import Application
 
 from app.auth import is_authorized_id
 from app.content_policy import ensure_policy_schema
+from app.id_ui import register_id_handler
 from app.multiuser_ui import main_menu as base_main_menu, register_multiuser_ui, shared_guard
 from app.quota_ui import register_quota_ui
 from app.reader_policy import install_reader_policy
@@ -25,6 +26,7 @@ def install_application(app: Application) -> None:
         return
 
     register_tenant_context(app)
+    register_id_handler(app)
     register_rejection_ui(app)
     register_quota_ui(app)
     register_multiuser_ui(app)
