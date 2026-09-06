@@ -70,6 +70,25 @@ async def set_period_quota(period_key: str, value: int) -> int:
     return value
 
 
+async def get_period_delay(period_key: str) -> int:
+    """Minimum minutes between ready posts shown to this user in a period."""
+    if period_key not in PERIODS:
+        return 0
+    raw = await get_setting(f"quota_delay_{period_key}", "60")
+    try:
+        return max(0, min(360, int(raw or 60)))
+    except Exception:
+        return 60
+
+
+async def set_period_delay(period_key: str, minutes: int) -> int:
+    if period_key not in PERIODS:
+        raise ValueError("Unknown period")
+    minutes = max(0, min(360, int(minutes)))
+    await set_setting(f"quota_delay_{period_key}", str(minutes))
+    return minutes
+
+
 def current_period(now_local: datetime | None = None) -> str | None:
     now_local = now_local or datetime.now(_tz())
     hour = now_local.hour
@@ -108,6 +127,42 @@ async def count_active_posts_in_period(user_id: int, period_key: str) -> int:
         return int((await cur.fetchone())[0])
 
 
+async def cooldown_state(user_id: int, period_key: str | None = None) -> dict:
+    period_key = period_key or current_period()
+    if not period_key:
+        return {"allowed": False, "delay_minutes": 0, "remaining_minutes": 0, "last_at": None}
+    delay = await get_period_delay(period_key)
+    if delay <= 0:
+        return {"allowed": True, "delay_minutes": 0, "remaining_minutes": 0, "last_at": None}
+    start_utc, end_utc = _period_utc_bounds(period_key)
+    async with aiosqlite.connect(settings.database_path) as db:
+        cur = await db.execute(
+            """SELECT created_at FROM news
+               WHERE user_id=? AND created_at>=? AND created_at<?
+                 AND status IN ('ready','scheduled','published')
+               ORDER BY created_at DESC LIMIT 1""",
+            (int(user_id), start_utc, end_utc),
+        )
+        row = await cur.fetchone()
+    if not row or not row[0]:
+        return {"allowed": True, "delay_minutes": delay, "remaining_minutes": 0, "last_at": None}
+    try:
+        last_at = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+        if last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=timezone.utc)
+    except Exception:
+        return {"allowed": True, "delay_minutes": delay, "remaining_minutes": 0, "last_at": str(row[0])}
+    next_at = last_at.astimezone(timezone.utc) + timedelta(minutes=delay)
+    now = datetime.now(timezone.utc)
+    remaining = max(0, int((next_at - now).total_seconds() // 60) + (1 if next_at > now else 0))
+    return {
+        "allowed": now >= next_at,
+        "delay_minutes": delay,
+        "remaining_minutes": remaining,
+        "last_at": last_at,
+    }
+
+
 async def quota_state(user_id: int) -> dict:
     result = {}
     for key, (_, _, label, _) in PERIODS.items():
@@ -115,6 +170,7 @@ async def quota_state(user_id: int) -> dict:
             "label": label,
             "quota": await get_period_quota(key),
             "count": await count_active_posts_in_period(user_id, key),
+            "delay_minutes": await get_period_delay(key),
         }
     return result
 
