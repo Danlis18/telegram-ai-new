@@ -129,8 +129,6 @@ async def sync_sources() -> tuple[int, list[str]]:
         if source.lower() not in resolved_names and source not in missing:
             missing.append(source)
 
-    # These two values are global service diagnostics. User-specific source lists
-    # live in user_sources and are shown by the workspace UI.
     await set_setting("active_sources", str(len(ACTIVE_SOURCE_IDS)))
     await set_setting("missing_sources", ",".join(missing))
     log.info(
@@ -356,16 +354,76 @@ async def source_sync_loop() -> None:
             log.exception("Periodic source sync failed")
 
 
+def _reader_error_message(exc: BaseException) -> tuple[str, str]:
+    name = type(exc).__name__
+    text = str(exc).strip()
+    lowered = text.lower()
+
+    if isinstance(exc, EOFError) or "enter your phone" in lowered:
+        return (
+            "SESSION_NOT_AUTHORIZED",
+            "Telegram .session не авторизована або пошкоджена. Завантаж нову <b>.session Telethon</b>, "
+            "заново створи Base64 _1/_2 і зроби redeploy.",
+        )
+    if name == "AuthKeyDuplicatedError":
+        return (
+            "AUTH_KEY_DUPLICATED",
+            "Telegram анулював authorization key через одночасне використання session з різних IP. "
+            "Потрібна нова <b>.session Telethon</b> і тільки один активний reader.",
+        )
+    if name in {"AuthKeyUnregisteredError", "UnauthorizedError"}:
+        return (
+            "SESSION_INVALID",
+            "Telegram session більше не дійсна. Потрібна нова авторизована <b>.session Telethon</b>.",
+        )
+    return (
+        name.upper(),
+        f"Reader не зміг запуститися: <code>{html.escape(name + ': ' + text[:700])}</code>",
+    )
+
+
 async def main():
     await init_db()
     await seed_owner_workspace(SOURCES, settings.target_channel)
     admin_app = await start_admin_bot()
+    owner_id = int(settings.admin_user_id) if settings.admin_user_id else None
     sync_task = None
+
     try:
-        await reader.start()
+        try:
+            await reader.start()
+        except Exception as exc:
+            status, explanation = _reader_error_message(exc)
+            log.exception("Telegram reader failed to start; admin bot remains online")
+            try:
+                await set_setting("reader_status", status)
+                await set_setting("reader_error", f"{type(exc).__name__}: {str(exc)[:1000]}")
+            except Exception:
+                log.exception("Failed to persist reader offline status")
+
+            if owner_id:
+                await notify_user(
+                    owner_id,
+                    "🔴 <b>SPORTS NEWS CONTROL</b>\n\n"
+                    "Reader: <b>OFFLINE</b>\n"
+                    f"Причина: <b>{html.escape(status)}</b>\n\n"
+                    f"{explanation}\n\n"
+                    "✅ Admin-бот залишився <b>ONLINE</b>. Можеш користуватися меню, налаштуваннями, "
+                    "користувачами та каналами. Після заміни session просто зроби redeploy.",
+                )
+
+            # Railway must keep the service alive so the admin bot keeps polling.
+            await asyncio.Event().wait()
+            return
+
         me = await reader.get_me()
+        try:
+            await set_setting("reader_status", "ONLINE")
+            await set_setting("reader_error", "")
+        except Exception:
+            log.exception("Failed to persist reader online status")
+
         joined_now, missing = await sync_sources()
-        owner_id = int(settings.admin_user_id) if settings.admin_user_id else None
         if owner_id:
             with user_scope(owner_id):
                 publish_mode = await get_publish_mode()
