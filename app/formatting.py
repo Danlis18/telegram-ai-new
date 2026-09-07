@@ -3,11 +3,18 @@ import re
 
 SPORTS_NEWS_URL = "https://t.me/sports_news_ua"
 
-_ALLOWED_TAG_RE = re.compile(r"</?(?:b|i|blockquote)>", re.IGNORECASE)
+# Keep only the Telegram HTML we explicitly support. Custom emoji are accepted
+# only with a numeric emoji-id so arbitrary attributes/HTML cannot slip through.
+_ALLOWED_TAG_RE = re.compile(
+    r'</?(?:b|i|blockquote)>'
+    r'|<tg-emoji\s+emoji-id=(?:"\d+"|\'\d+\')\s*>'
+    r'|</tg-emoji>',
+    re.IGNORECASE,
+)
 
 
 def _safe_telegram_html(text: str) -> str:
-    """Escape arbitrary HTML while preserving only safe Telegram formatting tags."""
+    """Escape arbitrary HTML while preserving supported Telegram formatting."""
     raw = (text or "").strip()
     if not raw:
         return ""
@@ -34,6 +41,6 @@ def post_html(text: str) -> str:
 
 
 def post_plain(text: str) -> str:
-    body = re.sub(r"</?(?:b|i|blockquote)>", "", (text or "").strip(), flags=re.IGNORECASE)
+    body = _ALLOWED_TAG_RE.sub("", (text or "").strip())
     footer = "SPORTS NEWS → на зв’язку."
     return f"{body}\n\n{footer}" if body else footer
