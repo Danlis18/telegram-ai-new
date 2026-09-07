@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from app import main as app_main
+from app.album_support import install_album_support
 
 log = logging.getLogger("telegram-ai-news.safe-entrypoint")
 
@@ -17,6 +18,9 @@ async def _non_interactive_start() -> None:
 
 
 async def run() -> None:
+    # Install media-album support before the admin bot and reader start.
+    install_album_support()
+
     # app.main calls reader.start(); replace it with a Railway-safe version that
     # only validates the uploaded session and never asks stdin for a phone/code.
     app_main.reader.start = _non_interactive_start
