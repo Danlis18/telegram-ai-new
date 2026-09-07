@@ -21,6 +21,19 @@ async def run() -> None:
     # Install media-album support before the admin bot and reader start.
     install_album_support()
 
+    # Ensure the existing multi-user/quota/rejection workspace handlers are
+    # installed on the Application that admin_bot creates.
+    from app import admin_bot
+    from app.bootstrap import install_application
+
+    album_register_publish_ui = admin_bot.register_publish_ui
+
+    def register_publish_ui_with_workspace(app):
+        album_register_publish_ui(app)
+        install_application(app)
+
+    admin_bot.register_publish_ui = register_publish_ui_with_workspace
+
     # app.main calls reader.start(); replace it with a Railway-safe version that
     # only validates the uploaded session and never asks stdin for a phone/code.
     app_main.reader.start = _non_interactive_start
