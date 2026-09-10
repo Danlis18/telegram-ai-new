@@ -2,6 +2,8 @@ import html
 import re
 
 SPORTS_NEWS_URL = "https://t.me/sports_news_ua"
+PREMIUM_ROCKET_ID = "5411580731929411768"
+PREMIUM_ROCKET_HTML = f'<tg-emoji emoji-id="{PREMIUM_ROCKET_ID}">🚀</tg-emoji>'
 
 # Keep only the Telegram HTML we explicitly support. Custom emoji are accepted
 # only with a numeric emoji-id so arbitrary attributes/HTML cannot slip through.
@@ -36,11 +38,11 @@ def _safe_telegram_html(text: str) -> str:
 
 def post_html(text: str) -> str:
     body = _safe_telegram_html(text)
-    footer = f'<a href="{SPORTS_NEWS_URL}"><b>SPORTS NEWS</b></a> → на зв’язку.'
+    footer = f'<a href="{SPORTS_NEWS_URL}"><b>SPORTS NEWS</b></a> → на зв’язку {PREMIUM_ROCKET_HTML}'
     return f"{body}\n\n{footer}" if body else footer
 
 
 def post_plain(text: str) -> str:
     body = _ALLOWED_TAG_RE.sub("", (text or "").strip())
-    footer = "SPORTS NEWS → на зв’язку."
+    footer = "SPORTS NEWS → на зв’язку 🚀"
     return f"{body}\n\n{footer}" if body else footer
