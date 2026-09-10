@@ -23,10 +23,34 @@ class Settings(BaseSettings):
     telegram_concurrent_updates: int = 8
     publish_timezone: str = "Europe/Kyiv"
 
+    # Dedicated non-rotating SOCKS5 for the Telethon/opentele2 reader only.
+    # The admin bot and OpenAI traffic continue using Railway normally.
+    telegram_proxy_host: str | None = None
+    telegram_proxy_port: int | None = None
+    telegram_proxy_user: str | None = None
+    telegram_proxy_password: str | None = None
+    telegram_proxy_rdns: bool = True
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()
+
+# If a dedicated SOCKS5 is configured, force every Telethon reader connection
+# through it. This is installed before app.main constructs the Telegram reader.
+try:
+    from app.telegram_proxy import install_telegram_reader_proxy
+
+    install_telegram_reader_proxy(settings)
+except RuntimeError:
+    # Invalid partial proxy configuration should fail closed instead of silently
+    # connecting the Telegram session from Railway's normal outbound IP.
+    raise
+except Exception:
+    # Missing optional proxy runtime dependencies are handled when deployment
+    # installs requirements; without proxy variables the project stays unchanged.
+    if settings.telegram_proxy_host or settings.telegram_proxy_port:
+        raise
 
 # Railway containers are ephemeral between redeploys. If a Railway Volume is
 # mounted, transparently keep SQLite on that volume unless DATABASE_PATH was
