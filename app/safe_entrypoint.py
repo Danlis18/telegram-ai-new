@@ -3,6 +3,7 @@ import logging
 
 from app import main as app_main
 from app.album_support import install_album_support
+from app.premium_emoji_support import install_premium_emoji_support
 
 log = logging.getLogger("telegram-ai-news.safe-entrypoint")
 
@@ -18,6 +19,10 @@ async def _non_interactive_start() -> None:
 
 
 async def run() -> None:
+    # Teach the rewriter to understand/reuse valid Telegram Premium emoji from
+    # manual editor examples before any news is processed.
+    install_premium_emoji_support()
+
     # Install media-album support before the admin bot and reader start.
     install_album_support()
 
