@@ -2,7 +2,7 @@ SOURCES = [
     "bfootballua",
     "v1latsports",
     "byi_bizhy",
-    "lateralbox1ng",
+    "lateral_box1ng",
     "breakevens",
     "sportsuspilne",
     "tatotake_ua",
