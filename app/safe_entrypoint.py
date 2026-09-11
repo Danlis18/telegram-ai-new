@@ -5,6 +5,7 @@ from app import main as app_main
 from app.album_support import install_album_support
 from app.config import settings
 from app.premium_emoji_support import install_premium_emoji_support
+from app.source_whitelist import install_source_whitelist
 from app.telegram_proxy import (
     assert_proxy_ready,
     check_telegram_proxy,
@@ -48,6 +49,10 @@ async def run() -> None:
 
     # Install media-album support before the admin bot and reader start.
     install_album_support()
+
+    # Keep the persistent DB and runtime parser restricted to the selected
+    # Telegram source whitelist only.
+    install_source_whitelist()
 
     # Ensure the existing multi-user/quota/rejection workspace handlers are
     # installed on the Application that admin_bot creates.
