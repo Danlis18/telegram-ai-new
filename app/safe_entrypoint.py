@@ -5,6 +5,7 @@ import logging
 from app import main as app_main
 from app.album_edit_fix import install_album_edit_fix
 from app.album_support import install_album_support
+from app.channel_hygiene import remove_old_test_posts
 from app.channel_workspace import install_channel_routing
 from app.compact_chat_runtime import install_compact_chat_runtime
 from app.compact_text_edit import install_compact_text_edit
@@ -93,6 +94,10 @@ async def run() -> None:
     # No startup/test/demo/channel message is ever sent automatically.
     install_user_publisher()
     await initialize_user_publisher()
+
+    # User explicitly requested removal of the old Premium/test diagnostics.
+    # This only deletes known test posts; it never sends anything to the channel.
+    await remove_old_test_posts()
 
     install_source_whitelist()
 
