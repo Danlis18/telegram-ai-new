@@ -13,16 +13,18 @@ from app.telegram_proxy import (
     check_telegram_proxy,
     install_proxy_status_runtime,
 )
+from app.user_publisher import (
+    initialize_user_publisher,
+    install_user_publisher,
+    install_user_publisher_status_runtime,
+)
 
 log = logging.getLogger("telegram-ai-news.safe-entrypoint")
 
 
 async def _non_interactive_start() -> None:
     """Connect Telegram reader without ever prompting for phone/code on Railway."""
-    # Fail closed: if SOCKS5 is configured but the startup health check failed,
-    # the Telegram session is never allowed to fall back to Railway's normal IP.
     assert_proxy_ready()
-
     await app_main.reader.connect()
     authorized = await app_main.reader.is_user_authorized()
     if not authorized:
@@ -32,8 +34,6 @@ async def _non_interactive_start() -> None:
 
 
 async def run() -> None:
-    # Verify the dedicated SOCKS5 before the admin/read pipeline starts. This
-    # check does not touch the Telegram auth key: it only tunnels TCP to Telegram.
     proxy_state = await check_telegram_proxy(settings)
     log.info(
         "Telegram proxy startup status=%s configured=%s endpoint=%s",
@@ -42,29 +42,28 @@ async def run() -> None:
         proxy_state.get("endpoint") or "-",
     )
 
-    # Add the proxy state to SPORTS NEWS CONTROL startup messages and ⚙️ status.
     install_proxy_status_runtime(app_main)
+    install_user_publisher_status_runtime(app_main)
 
-    # Teach the rewriter to understand/reuse valid Telegram Premium emoji from
-    # manual editor examples before any news is processed.
+    # Premium emoji are preserved from source/editor examples before any news is processed.
     install_premium_emoji_support()
 
-    # Install media-album support before the admin bot and reader start.
+    # Albums and batch photo editing.
     install_album_support()
-    # python-telegram-bot 22 InputMedia objects are immutable. The album editor
-    # must construct captions/parse_mode up front for every edited photo/video.
     install_album_edit_fix()
 
-    # Route every parsed source to its own publication channel. Existing sources
-    # are mapped to the current default channel on first startup.
+    # Per-source publication channel routing.
     install_channel_routing()
 
-    # Seed the selected default source set and keep join/retry logic active.
-    # Manually added sources are also allowed and survive future restarts.
+    # Final publishing layer: if TELEGRAM_PUBLISHER_SESSION_FILE_B64_1/_2 are
+    # configured, the Premium Telegram user account publishes through MTProto.
+    # Without them, existing Bot API publication remains unchanged.
+    install_user_publisher()
+    await initialize_user_publisher()
+
+    # Selected default sources plus manually added sources.
     install_source_whitelist()
 
-    # Ensure the existing multi-user/quota/rejection workspace handlers are
-    # installed on the Application that admin_bot creates.
     from app import admin_bot
     from app.bootstrap import install_application
 
@@ -76,8 +75,7 @@ async def run() -> None:
 
     admin_bot.register_publish_ui = register_publish_ui_with_workspace
 
-    # Remove old developer-only commands from both Telegram's command menu and
-    # the running handler table. They are no longer part of the production bot.
+    # Remove old developer-only commands from production bot.
     original_start_admin_bot = admin_bot.start_admin_bot
 
     async def start_admin_bot_without_test_commands():
@@ -97,8 +95,6 @@ async def run() -> None:
     admin_bot.start_admin_bot = start_admin_bot_without_test_commands
     app_main.start_admin_bot = start_admin_bot_without_test_commands
 
-    # app.main calls reader.start(); replace it with a Railway-safe version that
-    # only validates the uploaded session and never asks stdin for a phone/code.
     app_main.reader.start = _non_interactive_start
     await app_main.main()
 
