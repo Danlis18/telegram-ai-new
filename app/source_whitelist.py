@@ -11,38 +11,30 @@ from app.sources import SOURCES
 
 log = logging.getLogger("telegram-ai-news.source-whitelist")
 
-ALLOWED_SOURCES = tuple(dict.fromkeys(source.strip().lstrip("@").lower() for source in SOURCES if source.strip()))
+DEFAULT_SOURCES = tuple(dict.fromkeys(source.strip().lstrip("@").lower() for source in SOURCES if source.strip()))
 
 
 async def _sync_persistent_sources() -> None:
-    """Keep parser source storage restricted to the configured whitelist."""
-    if not ALLOWED_SOURCES:
+    """Keep the selected 14 as owner defaults without deleting manual additions."""
+    if not DEFAULT_SOURCES or not settings.admin_user_id:
         return
 
-    placeholders = ",".join("?" for _ in ALLOWED_SOURCES)
+    owner_id = int(settings.admin_user_id)
     async with aiosqlite.connect(settings.database_path) as db:
-        await db.execute(
-            f"DELETE FROM user_sources WHERE lower(username) NOT IN ({placeholders})",
-            ALLOWED_SOURCES,
-        )
-
-        if settings.admin_user_id:
-            owner_id = int(settings.admin_user_id)
-            for source in ALLOWED_SOURCES:
-                await db.execute(
-                    """INSERT INTO user_sources (user_id,username,is_active)
-                       VALUES (?,?,1)
-                       ON CONFLICT(user_id,username) DO UPDATE SET is_active=1""",
-                    (owner_id, source),
-                )
-
+        for source in DEFAULT_SOURCES:
+            await db.execute(
+                """INSERT INTO user_sources (user_id,username,is_active)
+                   VALUES (?,?,1)
+                   ON CONFLICT(user_id,username) DO UPDATE SET is_active=1""",
+                (owner_id, source),
+            )
         await db.commit()
 
-    log.info("Telegram source whitelist synchronized: %d sources", len(ALLOWED_SOURCES))
+    log.info("Default Telegram source set synchronized: %d sources", len(DEFAULT_SOURCES))
 
 
-async def _sync_all_whitelisted_sources(main_mod) -> tuple[int, list[str]]:
-    """Resolve/join every allowed source; one FloodWait must not stop the rest."""
+async def _sync_all_selected_sources(main_mod) -> tuple[int, list[str]]:
+    """Resolve/join every configured source; one FloodWait must not stop the rest."""
     wanted_sources = await main_mod.list_all_active_source_usernames()
     main_mod.ACTIVE_SOURCE_IDS.clear()
 
@@ -124,29 +116,25 @@ async def _sync_all_whitelisted_sources(main_mod) -> tuple[int, list[str]]:
 
 
 def install_source_whitelist() -> None:
-    """Restrict source discovery to SOURCES and retry every selected channel."""
+    """Seed the approved defaults and retry all current manual/default sources."""
     from app import main as main_mod
 
     if getattr(main_mod, "_source_whitelist_installed", False):
         return
 
     original_init_db = main_mod.init_db
-    original_list_sources = main_mod.list_all_active_source_usernames
-    allowed = set(ALLOWED_SOURCES)
 
-    async def init_db_with_source_whitelist():
+    async def init_db_with_default_sources():
         await original_init_db()
         await _sync_persistent_sources()
 
-    async def list_whitelisted_sources() -> list[str]:
-        sources = await original_list_sources()
-        return [source for source in sources if source.strip().lstrip("@").lower() in allowed]
+    async def sync_selected_sources() -> tuple[int, list[str]]:
+        return await _sync_all_selected_sources(main_mod)
 
-    async def sync_whitelisted_sources() -> tuple[int, list[str]]:
-        return await _sync_all_whitelisted_sources(main_mod)
-
-    main_mod.init_db = init_db_with_source_whitelist
-    main_mod.list_all_active_source_usernames = list_whitelisted_sources
-    main_mod.sync_sources = sync_whitelisted_sources
+    main_mod.init_db = init_db_with_default_sources
+    main_mod.sync_sources = sync_selected_sources
     main_mod._source_whitelist_installed = True
-    log.info("Installed Telegram source whitelist with %d allowed channels", len(allowed))
+    log.info(
+        "Installed Telegram source defaults with %d seeded channels; manual additions enabled",
+        len(DEFAULT_SOURCES),
+    )
