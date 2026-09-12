@@ -10,7 +10,6 @@ from app.compact_chat_runtime import install_compact_chat_runtime
 from app.compact_text_edit import install_compact_text_edit
 from app.config import settings
 from app.premium_emoji_support import install_premium_emoji_support
-from app.premium_test_post import run_one_time_premium_test
 from app.source_whitelist import install_source_whitelist
 from app.telegram_proxy import (
     assert_proxy_ready,
@@ -36,8 +35,6 @@ async def _non_interactive_start() -> None:
             "Telegram session is not authorized. Interactive phone login is disabled on Railway."
         )
 
-    # Resolve the exact Telegram account behind the uploaded reader .session.
-    # This is safe metadata only; never expose the auth key or session contents.
     me = await app_main.reader.get_me()
     reader_id = int(getattr(me, "id", 0) or 0)
     reader_username = (getattr(me, "username", None) or "").strip()
@@ -85,34 +82,18 @@ async def run() -> None:
     install_proxy_status_runtime(app_main)
     install_user_publisher_status_runtime(app_main)
 
-    # Premium emoji are preserved from source/editor examples before any news is processed.
     install_premium_emoji_support()
-
-    # Albums and batch photo editing.
     install_album_support()
     install_album_edit_fix()
-
-    # Keep the admin chat compact: replace album photos in place, preserve
-    # manually inserted Premium emoji and auto-delete old bot messages after 24h.
     install_compact_chat_runtime()
-    # Manual text edits must reuse the same control message instead of creating
-    # duplicate text copies. Premium/custom emoji IDs are preserved strictly.
     install_compact_text_edit()
-
-    # Per-source publication channel routing.
     install_channel_routing()
 
-    # Final publishing layer: if TELEGRAM_PUBLISHER_SESSION_FILE_B64_1/_2 are
-    # configured, the Premium Telegram user account publishes through MTProto.
-    # Without them, existing Bot API publication remains unchanged.
+    # Premium user publisher is initialized only as the transport for real news.
+    # No startup/test/demo/channel message is ever sent automatically.
     install_user_publisher()
     await initialize_user_publisher()
 
-    # Explicit one-time production test requested by the owner. The function is
-    # guarded by a persistent SQLite flag, so restarts/redeploys cannot duplicate it.
-    await run_one_time_premium_test(app_main)
-
-    # Selected default sources plus manually added sources.
     install_source_whitelist()
 
     from app import admin_bot
@@ -126,7 +107,6 @@ async def run() -> None:
 
     admin_bot.register_publish_ui = register_publish_ui_with_workspace
 
-    # Remove old developer-only commands from production bot.
     original_start_admin_bot = admin_bot.start_admin_bot
 
     async def start_admin_bot_without_test_commands():
