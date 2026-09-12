@@ -12,8 +12,10 @@ from app.compact_text_edit import install_compact_text_edit
 from app.config import settings
 from app.editorial_policy_runtime import install_editorial_policy
 from app.miniapp_bot_ui import install_miniapp_bot_ui
+from app.miniapp_channel_enhancements import install_channel_miniapp_enhancements
 from app.miniapp_server import start_miniapp_server
 from app.miniapp_url_fix import install_miniapp_url_fallback
+from app.persistence_runtime import prepare_persistence, start_persistence_backup_worker, storage_status
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
 from app.style_punctuation_runtime import install_punctuation_style
@@ -77,6 +79,13 @@ async def _non_interactive_start() -> None:
 
 
 async def run() -> None:
+    # Resolve database storage before any workspace/database operations. On Railway
+    # a mounted Volume is used automatically and a rolling SQLite snapshot is kept
+    # on the same durable storage. Existing legacy data is migrated on first boot.
+    await prepare_persistence()
+    start_persistence_backup_worker()
+    log.info("Storage status: %s", storage_status())
+
     proxy_state = await check_telegram_proxy(settings)
     log.info(
         "Telegram proxy startup status=%s configured=%s endpoint=%s",
@@ -114,6 +123,9 @@ async def run() -> None:
     # Railway's public domain can be created after a deployment. Resolve it here,
     # with the current production domain as a safe fallback, before bot menus are built.
     install_miniapp_url_fallback()
+
+    # Extra Mini App APIs are additive: avatars, hidden channel actions and storage health.
+    install_channel_miniapp_enhancements()
 
     # The Mini App is an additional control surface over the same database and
     # runtime functions. It does not replace or alter Telegram bot controls.
