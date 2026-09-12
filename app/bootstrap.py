@@ -4,6 +4,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application
 
 from app.auth import is_authorized_id
+from app.channel_workspace import ensure_channel_route_schema, register_channel_workspace_ui
 from app.content_policy import ensure_policy_schema
 from app.id_ui import register_id_handler
 from app.multiuser_ui import main_menu as base_main_menu, register_multiuser_ui, shared_guard
@@ -29,11 +30,19 @@ def install_application(app: Application) -> None:
     register_id_handler(app)
     register_rejection_ui(app)
     register_quota_ui(app)
+    # Register before the legacy channels UI so the new split workspace catches
+    # channels_menu/source routing callbacks first.
+    register_channel_workspace_ui(app)
     register_multiuser_ui(app)
     install_reader_policy(app)
 
     try:
         asyncio.create_task(ensure_policy_schema())
+    except RuntimeError:
+        pass
+
+    try:
+        asyncio.create_task(ensure_channel_route_schema())
     except RuntimeError:
         pass
 
