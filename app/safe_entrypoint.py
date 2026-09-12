@@ -8,6 +8,7 @@ from app.album_support import install_album_support
 from app.channel_workspace import install_channel_routing
 from app.config import settings
 from app.premium_emoji_support import install_premium_emoji_support
+from app.premium_test_post import run_one_time_premium_test
 from app.source_whitelist import install_source_whitelist
 from app.telegram_proxy import (
     assert_proxy_ready,
@@ -97,6 +98,10 @@ async def run() -> None:
     # Without them, existing Bot API publication remains unchanged.
     install_user_publisher()
     await initialize_user_publisher()
+
+    # Explicit one-time production test requested by the owner. The function is
+    # guarded by a persistent SQLite flag, so restarts/redeploys cannot duplicate it.
+    await run_one_time_premium_test(app_main)
 
     # Selected default sources plus manually added sources.
     install_source_whitelist()
