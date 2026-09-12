@@ -122,6 +122,7 @@ async def run() -> None:
     from telegram import MenuButtonWebApp, WebAppInfo
     from app import admin_bot
     from app.bootstrap import install_application
+    from app.database import list_users
     from app.miniapp_server import miniapp_public_url
 
     album_register_publish_ui = admin_bot.register_publish_ui
@@ -152,16 +153,34 @@ async def run() -> None:
         commands.append(("id", "Показати Telegram ID"))
         await app.bot.set_my_commands(commands)
 
-        # Persistent Web App button next to Telegram's message field. This is global
-        # for all users and complements /app without removing the classic bot menu.
+        # Persistent Mini App launcher. Set both the global default and explicit
+        # per-user buttons so Telegram clients with an older cached menu state are
+        # updated immediately. Mini App auth still blocks unauthorized users.
         if app_url:
-            await app.bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(
-                    text="Відкрити",
-                    web_app=WebAppInfo(url=app_url),
-                )
+            menu_button = MenuButtonWebApp(
+                text="OPEN",
+                web_app=WebAppInfo(url=app_url),
             )
-            log.info("Mini App chat menu button configured url=%s", app_url)
+            await app.bot.set_chat_menu_button(menu_button=menu_button)
+
+            chat_ids: set[int] = set()
+            if settings.admin_user_id:
+                chat_ids.add(int(settings.admin_user_id))
+            try:
+                for row in await list_users(active_only=True):
+                    user_id = int(row.get("telegram_user_id") or 0)
+                    if user_id:
+                        chat_ids.add(user_id)
+            except Exception:
+                log.exception("Could not enumerate users while configuring Mini App menu buttons")
+
+            for chat_id in chat_ids:
+                try:
+                    await app.bot.set_chat_menu_button(chat_id=chat_id, menu_button=menu_button)
+                except Exception:
+                    log.exception("Could not configure Mini App OPEN button for chat_id=%s", chat_id)
+
+            log.info("Mini App OPEN button configured globally and for %d active chats url=%s", len(chat_ids), app_url)
         return app
 
     admin_bot.start_admin_bot = start_admin_bot_without_test_commands
