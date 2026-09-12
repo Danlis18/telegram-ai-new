@@ -6,10 +6,12 @@
   <meta name="theme-color" content="#030b1f" />
   <title>Auto Posting</title>
   <link rel="stylesheet" href="./app.css" />
+  <link rel="stylesheet" href="./lux.css?v=2" />
 </head>
 <body>
   <div class="ambient ambient-a"></div>
   <div class="ambient ambient-b"></div>
+  <div class="lux-grid" aria-hidden="true"></div>
   <div id="app" class="app-shell">
     <header class="topbar">
       <div class="brand-lockup">
@@ -24,50 +26,53 @@
 
     <main class="main-view">
       <section id="screen-home" class="screen active" data-screen="home">
-        <div class="hero-card panel">
+        <div class="hero-card panel lux-hero">
           <div class="hero-copy">
             <span class="eyebrow">AUTO POSTING SYSTEM</span>
             <h1 id="helloTitle">Керування без зайвого шуму</h1>
             <p id="helloText">Новини, канали, ліміти та публікація в одному місці.</p>
+            <div class="hero-live"><i></i><span>LIVE WORKSPACE</span></div>
           </div>
           <div class="hero-orbit"><div class="hero-logo"></div></div>
         </div>
 
         <div class="section-head"><h2>Сьогодні</h2><span id="todayLabel" class="muted"></span></div>
-        <div class="metric-grid">
-          <button class="metric-card panel" data-go="posts"><div class="metric-icon cyan">✓</div><div class="metric-value" id="mReady">0</div><div class="metric-label">Готові</div></button>
+        <div class="metric-grid lux-metrics">
+          <button class="metric-card panel" data-go="posts"><div class="metric-icon cyan">✓</div><div class="metric-value" id="mReady">0</div><div class="metric-label">На публікацію</div></button>
           <button class="metric-card panel" data-go="posts" data-tab="scheduled"><div class="metric-icon violet">◷</div><div class="metric-value" id="mScheduled">0</div><div class="metric-label">Заплановано</div></button>
           <div class="metric-card panel"><div class="metric-icon blue">↗</div><div class="metric-value" id="mPublished">0</div><div class="metric-label">Опубліковано</div></div>
           <div class="metric-card panel"><div class="metric-icon green">◉</div><div class="metric-value" id="mSources">0</div><div class="metric-label">Джерел</div></div>
         </div>
 
+        <div class="section-head live-head">
+          <div><h2>На публікацію</h2><span class="live-sub"><i></i><span id="liveQueueCount">Синхронізація…</span></span></div>
+          <div class="live-head-actions"><button id="liveQueueRefresh" class="mini-circle" type="button" aria-label="Оновити">↻</button><button class="text-button" data-go="posts">Усі</button></div>
+        </div>
+        <div id="liveQueue" class="live-queue" aria-live="polite">
+          <div class="live-skeleton"></div><div class="live-skeleton"></div>
+        </div>
+
         <div class="section-head"><h2>Система</h2><button class="text-button" data-refresh>Оновити</button></div>
-        <div class="system-card panel">
+        <div class="system-card panel lux-system">
           <div class="system-row"><div><span class="system-name">Telegram Reader</span><span class="system-desc">Парсинг джерел</span></div><span id="readerState" class="state-badge">…</span></div>
           <div class="divider"></div>
           <div class="system-row"><div><span class="system-name">Premium Publisher</span><span class="system-desc" id="publisherDesc">Публікація з Premium emoji</span></div><span id="publisherState" class="state-badge">…</span></div>
           <div class="divider"></div>
-          <div class="system-row"><div><span class="system-name">Режим публікації</span><span class="system-desc">Можна змінити в налаштуваннях</span></div><span id="publishModeState" class="state-badge accent">…</span></div>
+          <div class="system-row"><div><span class="system-name">Режим публікації</span><span class="system-desc">Керується окремо для workspace</span></div><span id="publishModeState" class="state-badge accent">…</span></div>
         </div>
 
-        <div class="section-head"><h2>Швидкі дії</h2></div>
-        <div class="quick-grid">
-          <button class="quick-card panel" data-go="posts"><span class="quick-icon">▣</span><strong>Черга постів</strong><small>Перегляд і публікація</small></button>
-          <button class="quick-card panel" data-go="channels"><span class="quick-icon">⌁</span><strong>Канали</strong><small>Джерела та маршрути</small></button>
-          <button class="quick-card panel" data-go="settings"><span class="quick-icon">⌘</span><strong>Ліміти</strong><small>Кількість і затримки</small></button>
-          <button class="quick-card panel" id="analyticsButton"><span class="quick-icon">⌁</span><strong>Аналітика</strong><small>Динаміка за 7 днів</small></button>
-        </div>
+        <button id="analyticsButton" class="hidden" type="button"></button>
         <div id="analyticsCard" class="panel analytics-card hidden"></div>
       </section>
 
       <section id="screen-posts" class="screen" data-screen="posts">
-        <div class="page-title-row"><div><span class="eyebrow">CONTENT FLOW</span><h1>Пости</h1></div><button class="circle-btn" data-refresh aria-label="Оновити">↻</button></div>
-        <div class="segmented" id="postTabs"><button class="active" data-post-tab="ready">Готові</button><button data-post-tab="scheduled">Заплановані</button><button data-post-tab="archive">Архів</button></div>
+        <div class="page-title-row"><div><span class="eyebrow">CONTENT FLOW</span><h1>Черга</h1><p class="page-subtitle">Швидка перевірка, редагування та публікація</p></div><button class="circle-btn" data-refresh aria-label="Оновити">↻</button></div>
+        <div class="segmented" id="postTabs"><button class="active" data-post-tab="ready">На публікацію</button><button data-post-tab="scheduled">Заплановані</button><button data-post-tab="archive">Історія</button></div>
         <div id="postsList" class="posts-list"></div>
       </section>
 
       <section id="screen-channels" class="screen" data-screen="channels">
-        <div class="page-title-row"><div><span class="eyebrow">ROUTING</span><h1>Канали</h1></div><button class="circle-btn" id="addChannelButton">＋</button></div>
+        <div class="page-title-row"><div><span class="eyebrow">ROUTING</span><h1>Канали</h1><p class="page-subtitle">Куди й звідки рухається контент</p></div><button class="circle-btn" id="addChannelButton">＋</button></div>
         <div class="section-head"><h2>Канали публікації</h2><span id="targetsCount" class="muted"></span></div>
         <div id="targetsList" class="stack-list"></div>
         <div class="section-head sources-head"><h2>Джерела</h2><button class="text-button" id="addSourceButton">Додати</button></div>
@@ -75,7 +80,7 @@
       </section>
 
       <section id="screen-settings" class="screen" data-screen="settings">
-        <div class="page-title-row"><div><span class="eyebrow">WORKSPACE</span><h1>Налаштування</h1></div></div>
+        <div class="page-title-row"><div><span class="eyebrow">WORKSPACE</span><h1>Control</h1><p class="page-subtitle">Автоматизація, ліміти та Premium</p></div></div>
         <div class="settings-group panel">
           <div class="settings-title">Автоматизація</div>
           <div class="setting-row"><div><strong>Автопублікація</strong><small>Публікувати готові новини автоматично</small></div><button id="publishToggle" class="toggle" data-mode="publish"><span></span></button></div>
@@ -88,15 +93,15 @@
         <div id="quotaList" class="quota-list"></div>
         <div class="section-head"><h2>Premium emoji</h2></div>
         <div class="panel premium-panel"><div class="premium-head"><div class="premium-orb">✦</div><div><strong>Premium Publisher</strong><small id="premiumStatusText">Перевірка…</small></div></div><div id="premiumPalette" class="emoji-palette preview-only"></div></div>
-        <div class="version-note">Auto Posting Mini App · production control layer</div>
+        <div class="version-note">Auto Posting · private production workspace</div>
       </section>
     </main>
 
-    <nav class="bottom-nav">
-      <button class="nav-item active" data-nav="home"><span>⌂</span><small>Головна</small></button>
-      <button class="nav-item" data-nav="posts"><span>▣</span><small>Пости</small><i id="queueBadge" class="nav-badge hidden">0</i></button>
+    <nav class="bottom-nav lux-nav">
+      <button class="nav-item active" data-nav="home"><span>⌂</span><small>Огляд</small></button>
+      <button class="nav-item queue-nav" data-nav="posts"><span>▣</span><small>Черга</small><i id="queueBadge" class="nav-badge hidden">0</i></button>
       <button class="nav-item" data-nav="channels"><span>⌁</span><small>Канали</small></button>
-      <button class="nav-item" data-nav="settings"><span>⚙</span><small>Налашт.</small></button>
+      <button class="nav-item" data-nav="settings"><span>⚙</span><small>Control</small></button>
     </nav>
   </div>
 
@@ -126,5 +131,6 @@
   <div id="loader" class="loader-overlay"><div class="loader-logo"></div><div class="loader-ring"></div><span>Auto Posting</span></div>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="./app.js"></script>
+  <script src="./lux.js?v=2"></script>
 </body>
 </html>
