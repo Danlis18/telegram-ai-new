@@ -10,6 +10,7 @@ from app.channel_workspace import install_channel_routing
 from app.compact_chat_runtime import install_compact_chat_runtime
 from app.compact_text_edit import install_compact_text_edit
 from app.config import settings
+from app.editorial_policy_runtime import install_editorial_policy
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
 from app.telegram_proxy import (
@@ -84,6 +85,9 @@ async def run() -> None:
     install_user_publisher_status_runtime(app_main)
 
     install_premium_emoji_support()
+    # Editorial rules apply after Premium emoji support so all rewrite paths share
+    # Kyiv-time conversion and the Russia publication gate.
+    install_editorial_policy()
     install_album_support()
     install_album_edit_fix()
     install_compact_chat_runtime()
