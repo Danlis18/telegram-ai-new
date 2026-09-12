@@ -12,7 +12,8 @@ from app.compact_text_edit import install_compact_text_edit
 from app.config import settings
 from app.editorial_policy_runtime import install_editorial_policy
 from app.miniapp_bot_ui import install_miniapp_bot_ui
-from app.miniapp_server import miniapp_public_url, start_miniapp_server
+from app.miniapp_server import start_miniapp_server
+from app.miniapp_url_fix import install_miniapp_url_fallback
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
 from app.style_punctuation_runtime import install_punctuation_style
@@ -110,12 +111,17 @@ async def run() -> None:
 
     install_source_whitelist()
 
+    # Railway's public domain can be created after a deployment. Resolve it here,
+    # with the current production domain as a safe fallback, before bot menus are built.
+    install_miniapp_url_fallback()
+
     # The Mini App is an additional control surface over the same database and
     # runtime functions. It does not replace or alter Telegram bot controls.
     await start_miniapp_server()
 
     from app import admin_bot
     from app.bootstrap import install_application
+    from app.miniapp_server import miniapp_public_url
 
     album_register_publish_ui = admin_bot.register_publish_ui
 
