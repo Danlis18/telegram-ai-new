@@ -1,15 +1,14 @@
 import logging
 import re
-from contextlib import suppress
 
 from telegram import Update
-from telegram.ext import ContextTypes
+from telegram.ext import ApplicationHandlerStop, ContextTypes
 
 log = logging.getLogger("telegram-ai-news.compact-text-edit")
 
 
 def install_compact_text_edit() -> None:
-    """Keep manual text editing in one control message and preserve Premium emoji."""
+    """Store manual edits once, preserve Premium emoji, and never echo duplicate post text."""
     from app import admin_bot
     from app.compact_chat_runtime import _editor_message_html
 
@@ -22,9 +21,7 @@ def install_compact_text_edit() -> None:
         q = update.callback_query
         data = (q.data or "") if q else ""
         if q and data.startswith("edit:"):
-            # Remember the exact control message that becomes the edit prompt.
-            # The submitted editor message will be deleted and this same message
-            # will be changed back into the final post, so the chat gets no duplicate.
+            # This exact bot message becomes a compact status/control block after save.
             context.user_data["editing_prompt_message_id"] = int(q.message.message_id)
             context.user_data["editing_prompt_chat_id"] = int(q.message.chat_id)
         elif data in {"menu", "queue", "cancel_edit"}:
@@ -44,17 +41,16 @@ def install_compact_text_edit() -> None:
             context.user_data.pop("editing_news_id", None)
             context.user_data.pop("editing_prompt_message_id", None)
             context.user_data.pop("editing_prompt_chat_id", None)
-            with suppress(Exception):
-                await update.message.delete()
-            return
+            raise ApplicationHandlerStop
 
-        # Explicitly rebuild Telegram HTML from entities. This is mandatory for
-        # custom_emoji: text/text_html alone can lose the custom_emoji_id.
+        # Rebuild HTML directly from Telegram entities. custom_emoji_id is preserved
+        # exactly, so Premium emoji remain Premium in storage and final publication.
         rendered = _editor_message_html(update.message)
         corrected = admin_bot._clean_editor_text(rendered)
         if len(re.sub(r"<[^>]+>", "", corrected).strip()) < 20:
-            # Keep the user's text visible on validation errors so they can fix it.
-            return
+            # Do not create another explanatory text copy. Leave the user's message
+            # visible so it can be corrected and resubmitted.
+            raise ApplicationHandlerStop
 
         old_ai = row.get("rewritten_text") or ""
         await admin_bot.save_editorial_feedback(
@@ -67,37 +63,31 @@ def install_compact_text_edit() -> None:
         prompt_chat_id = context.user_data.pop("editing_prompt_chat_id", None)
         context.user_data.pop("editing_news_id", None)
 
-        # Remove the submitted copy after it has been safely stored. The final
-        # version stays only once: inside the existing control message.
-        with suppress(Exception):
-            await update.message.delete()
-
-        final_html = admin_bot.post_html(corrected)
+        # STRICT NO-DUPLICATE RULE:
+        # Never resend/echo the edited post text. The user's submitted Telegram
+        # message is the single visible copy (and therefore keeps native Premium
+        # emoji rendering). The bot only keeps a compact control/status message.
         if prompt_message_id and prompt_chat_id:
             try:
                 await context.bot.edit_message_text(
                     chat_id=int(prompt_chat_id),
                     message_id=int(prompt_message_id),
-                    text=final_html,
+                    text=(
+                        f"✅ <b>Текст поста #{news_id} збережено</b>\n"
+                        "Premium emoji та форматування збережені."
+                    ),
                     parse_mode="HTML",
                     reply_markup=admin_bot.item_menu(row),
                     disable_web_page_preview=True,
                 )
-                return
             except Exception:
-                log.exception("Could not reuse editor control message for post=%s", news_id)
+                log.exception("Could not update compact editor control for post=%s", news_id)
 
-        # Rare fallback for an old/deleted prompt. Still send only the final post,
-        # without extra explanatory/duplicate text.
-        await context.bot.send_message(
-            chat_id=int(update.effective_chat.id),
-            text=final_html,
-            parse_mode="HTML",
-            reply_markup=admin_bot.item_menu(row),
-            disable_web_page_preview=True,
-        )
+        # Stop this update completely so no legacy/editor handler can produce a
+        # second response for the same submitted text.
+        raise ApplicationHandlerStop
 
     admin_bot.callback = compact_callback
     admin_bot.handle_editor_text = compact_editor_text
     admin_bot._compact_text_edit_installed = True
-    log.info("Installed no-duplicate manual text editor with strict Premium emoji entity preservation")
+    log.info("Installed strict single-copy manual editor with Premium emoji preservation")
