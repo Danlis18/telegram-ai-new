@@ -1,0 +1,23 @@
+/* Full-frame Mini App media viewer: never crop source media. */
+.sheet-media.lux-media-safe,
+.sheet-media.lux-media-carousel{height:min(64svh,620px)!important;min-height:320px;background:#020611!important;border-radius:22px!important;overflow:hidden!important;position:relative!important;border:1px solid rgba(97,164,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.025),0 16px 44px rgba(0,0,0,.28)}
+.sheet-media.lux-media-safe img,.sheet-media.lux-media-safe video{object-fit:contain!important;background:#020611}
+.lux-carousel-stage{position:relative;width:100%;height:100%;overflow:hidden;touch-action:pan-y;background:radial-gradient(circle at 50% 38%,rgba(25,63,122,.22),transparent 50%),#020611}
+.lux-carousel-slide{position:absolute;inset:0;display:grid;place-items:center;opacity:0;transform:translateX(4%) scale(.995);transition:opacity .34s cubic-bezier(.2,.72,.2,1),transform .42s cubic-bezier(.2,.72,.2,1);pointer-events:none;will-change:opacity,transform}
+.lux-carousel-slide.active{opacity:1;transform:none;pointer-events:auto;z-index:2}
+.lux-carousel-slide img,.lux-carousel-slide video{width:100%;height:100%;object-fit:contain!important;object-position:center center!important;display:block;background:#020611;-webkit-user-select:none;user-select:none}
+.lux-carousel-shade{position:absolute;z-index:3;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(1,5,14,.18),transparent 18%,transparent 76%,rgba(1,5,14,.28));}
+.lux-carousel-counter{position:absolute;z-index:5;right:15px;top:14px;height:33px;min-width:58px;padding:0 11px;border-radius:13px;display:flex;align-items:center;justify-content:center;gap:6px;color:#f4f8ff;font-size:11px;font-weight:800;letter-spacing:.2px;background:rgba(4,10,23,.72);border:1px solid rgba(255,255,255,.1);backdrop-filter:blur(14px);box-shadow:0 8px 22px rgba(0,0,0,.22)}
+.lux-carousel-counter i{font-style:normal;color:#7082a8;font-weight:600}
+.lux-carousel-progress{position:absolute;z-index:5;right:14px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;align-items:center;gap:7px;padding:8px 7px;border-radius:999px;background:rgba(4,10,23,.48);border:1px solid rgba(255,255,255,.07);backdrop-filter:blur(12px);box-shadow:0 8px 24px rgba(0,0,0,.2)}
+.lux-progress-track{position:relative;display:block;width:3px;height:64px;border-radius:99px;background:rgba(255,255,255,.14);overflow:hidden}
+.lux-progress-track i{position:absolute;left:0;right:0;top:0;height:0;border-radius:99px;background:linear-gradient(180deg,#4be9ff,#3c82ff 58%,#8c62ff);box-shadow:0 0 10px rgba(61,206,255,.65)}
+.lux-carousel-progress small{font-size:7px;line-height:1;color:#8191b3;font-weight:850;letter-spacing:.45px}
+@keyframes luxMediaClock{from{height:0}to{height:100%}}
+.lux-swipe-hint{position:absolute;z-index:5;left:50%;bottom:12px;transform:translateX(-50%);padding:5px 9px;border-radius:999px;background:rgba(3,9,20,.36);border:1px solid rgba(255,255,255,.055);backdrop-filter:blur(9px);font-size:7px;letter-spacing:1px;text-transform:uppercase;color:rgba(214,229,255,.42);pointer-events:none;animation:luxHintFade 4.5s ease forwards}
+@keyframes luxHintFade{0%,55%{opacity:1}100%{opacity:0}}
+.sheet-media.lux-media-carousel:not(.media-ready){background:linear-gradient(100deg,#061126,#0b1e3d,#061126)!important;background-size:220% 100%!important;animation:luxMediaLoad 1.15s linear infinite}
+@keyframes luxMediaLoad{to{background-position:-220% 0}}
+@media(max-width:520px){.sheet-media.lux-media-safe,.sheet-media.lux-media-carousel{height:min(61svh,570px)!important;min-height:300px}.lux-carousel-counter{right:12px;top:12px}.lux-carousel-progress{right:10px}.lux-progress-track{height:58px}}
+@media(max-width:380px){.sheet-media.lux-media-safe,.sheet-media.lux-media-carousel{height:min(58svh,520px)!important;min-height:280px}.lux-carousel-progress{right:8px;padding:7px 6px}.lux-progress-track{height:52px}}
+@media(prefers-reduced-motion:reduce){.lux-carousel-slide{transition:none}.lux-progress-track i{animation:none!important;height:100%!important}.lux-swipe-hint{display:none}}
