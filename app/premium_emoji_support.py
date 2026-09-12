@@ -1,6 +1,5 @@
 import html
 import re
-from types import SimpleNamespace
 
 from app import ai_editor
 
@@ -44,8 +43,6 @@ def _fallback_emoji(value: str) -> str:
     value = html.unescape((value or "").strip())
     if not value or value.startswith("<"):
         return "✨"
-    # Keep the source glyph/emoji. Telegram itself validates whether it is a
-    # valid alternative; source custom-emoji entities normally contain one.
     return value[:16]
 
 
@@ -75,7 +72,6 @@ def telethon_message_html(message) -> str:
     if not custom:
         return text
 
-    # Work backwards so inserting tags does not change earlier offsets.
     rendered = text
     for start, end, emoji_id in sorted(custom, key=lambda item: item[0], reverse=True):
         fallback = _fallback_emoji(rendered[start:end])
@@ -140,11 +136,8 @@ def install_premium_emoji_support() -> None:
     if getattr(ai_editor, "_premium_emoji_support_installed", False):
         return
 
-    # Teach the AI that exact custom-emoji IDs from the source/editor examples
-    # are reusable formatting, never markup to escape or invent.
     ai_editor.SYSTEM_PROMPT = ai_editor.SYSTEM_PROMPT.rstrip() + _PREMIUM_RULES
 
-    # Validate AI output so a model can never invent a random custom-emoji ID.
     original_rewrite = ai_editor.rewrite_news
 
     async def rewrite_news_with_premium_emoji(text: str, source: str) -> dict:
@@ -157,11 +150,9 @@ def install_premium_emoji_support() -> None:
 
     ai_editor.rewrite_news = rewrite_news_with_premium_emoji
 
-    # Telethon's raw_text does not contain custom-emoji IDs. Convert its
-    # MessageEntityCustomEmoji entities into Bot API <tg-emoji> HTML before the
-    # moderation/rewrite pipeline sees the source text. This wrapper is installed
-    # before album/quota wrappers, so it also works for grouped media posts.
-    from app import main as main_mod
+    # Telethon's raw_text omits the custom-emoji ID. Convert the reader's
+    # MessageEntityCustomEmoji entities to Bot API HTML before AI sees them.
+    from app import admin_bot, main as main_mod
 
     original_process = main_mod.process_message
 
@@ -173,7 +164,10 @@ def install_premium_emoji_support() -> None:
 
     main_mod.process_message = process_message_with_premium_emoji
 
-    # main.py imported rewrite_news directly, so replace that bound reference too.
+    # These modules imported rewrite_news directly before this runtime patch.
+    # Replace their bound references so normal parsing AND manual "Інший варіант"
+    # use the same ID validation and learned Premium emoji palette.
     main_mod.rewrite_news = rewrite_news_with_premium_emoji
+    admin_bot.rewrite_news = rewrite_news_with_premium_emoji
 
     ai_editor._premium_emoji_support_installed = True
