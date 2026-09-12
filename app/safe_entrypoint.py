@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from app import main as app_main
+from app.album_edit_fix import install_album_edit_fix
 from app.album_support import install_album_support
 from app.channel_workspace import install_channel_routing
 from app.config import settings
@@ -50,6 +51,9 @@ async def run() -> None:
 
     # Install media-album support before the admin bot and reader start.
     install_album_support()
+    # python-telegram-bot 22 InputMedia objects are immutable. The album editor
+    # must construct captions/parse_mode up front for every edited photo/video.
+    install_album_edit_fix()
 
     # Route every parsed source to its own publication channel. Existing sources
     # are mapped to the current default channel on first startup.
