@@ -119,6 +119,7 @@ async def run() -> None:
     # runtime functions. It does not replace or alter Telegram bot controls.
     await start_miniapp_server()
 
+    from telegram import MenuButtonWebApp, WebAppInfo
     from app import admin_bot
     from app.bootstrap import install_application
     from app.miniapp_server import miniapp_public_url
@@ -145,10 +146,22 @@ async def run() -> None:
             ("start", "Відкрити SPORTS NEWS CONTROL"),
             ("menu", "Головне меню"),
         ]
-        if miniapp_public_url():
+        app_url = miniapp_public_url()
+        if app_url:
             commands.append(("app", "Відкрити Mini App"))
         commands.append(("id", "Показати Telegram ID"))
         await app.bot.set_my_commands(commands)
+
+        # Persistent Web App button next to Telegram's message field. This is global
+        # for all users and complements /app without removing the classic bot menu.
+        if app_url:
+            await app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Відкрити",
+                    web_app=WebAppInfo(url=app_url),
+                )
+            )
+            log.info("Mini App chat menu button configured url=%s", app_url)
         return app
 
     admin_bot.start_admin_bot = start_admin_bot_without_test_commands
