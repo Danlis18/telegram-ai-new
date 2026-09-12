@@ -12,7 +12,7 @@ from app.compact_text_edit import install_compact_text_edit
 from app.config import settings
 from app.editorial_policy_runtime import install_editorial_policy
 from app.miniapp_bot_ui import install_miniapp_bot_ui
-from app.miniapp_server import start_miniapp_server
+from app.miniapp_server import miniapp_public_url, start_miniapp_server
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
 from app.style_punctuation_runtime import install_punctuation_style
@@ -139,7 +139,7 @@ async def run() -> None:
             ("start", "Відкрити SPORTS NEWS CONTROL"),
             ("menu", "Головне меню"),
         ]
-        if start_miniapp_server and __import__("app.miniapp_server", fromlist=["miniapp_public_url"]).miniapp_public_url():
+        if miniapp_public_url():
             commands.append(("app", "Відкрити Mini App"))
         commands.append(("id", "Показати Telegram ID"))
         await app.bot.set_my_commands(commands)
