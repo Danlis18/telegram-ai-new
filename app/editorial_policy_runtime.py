@@ -25,7 +25,7 @@ _POLICY_PROMPT = """
 - Канал український. Усі години з будь-яких чужих часових поясів переводь у локальний час Europe/Kyiv.
 - Якщо джерело пише МСК/MSK, UTC/GMT, CET/CEST, EET/EEST, EST/EDT, PST/PDT або інший часовий пояс — перерахуй саму годину на Київ.
 - Якщо в джерелі є дата події, враховуй саме цю дату при переході літній/зимовий час у Europe/Kyiv.
-- Якщо дати немає, орієнтуйся на поточний київський час, який передається нижче в системному контексті.
+- Якщо дати немає, орієнтуйся на поточний київський час зі службового контексту, доданого до вхідної новини.
 - У готовому пості НЕ пиши «МСК», «за московським часом», «за Києвом», «за українським часом», UTC, GMT або назву будь-якого часового поясу. Просто пиши природно: «початок о 22:00».
 - Не залишай чужу годину без конвертації.
 
@@ -43,9 +43,9 @@ def _kyiv_context() -> str:
     offset = now.strftime("%z")
     offset = f"UTC{offset[:3]}:{offset[3:]}" if offset else "Europe/Kyiv"
     return (
-        "\n\nПОТОЧНИЙ ЧАСОВИЙ КОНТЕКСТ ДЛЯ КОНВЕРТАЦІЇ:\n"
+        "\n\n[СЛУЖБОВИЙ ЧАСОВИЙ КОНТЕКСТ — НЕ ПУБЛІКУВАТИ]\n"
         f"Зараз у Europe/Kyiv: {now.strftime('%Y-%m-%d %H:%M')} ({offset}).\n"
-        "Це службовий контекст. Не згадуй його в готовому пості."
+        "Цей рядок потрібен тільки для правильного перерахунку часу. Не цитуй і не згадуй його в пості."
     )
 
 
@@ -96,18 +96,15 @@ def install_editorial_policy() -> None:
     if getattr(ai_editor, "_sports_news_editorial_policy_installed", False):
         return
 
-    # Append rules to whatever prompt is currently active (including Premium emoji rules).
+    # Append persistent editorial rules after Premium emoji rules.
     ai_editor.SYSTEM_PROMPT = ai_editor.SYSTEM_PROMPT.rstrip() + _POLICY_PROMPT
     original_rewrite = ai_editor.rewrite_news
 
     async def rewrite_with_editorial_policy(text: str, source: str) -> dict:
-        # Dynamic Kyiv offset is included on every request so undated foreign times can be converted correctly.
-        original_prompt = ai_editor.SYSTEM_PROMPT
-        ai_editor.SYSTEM_PROMPT = original_prompt + _kyiv_context()
-        try:
-            result = await original_rewrite(text, source)
-        finally:
-            ai_editor.SYSTEM_PROMPT = original_prompt
+        # Add current Kyiv offset to this request only; do not mutate the global prompt,
+        # because several source posts can be rewritten concurrently.
+        request_text = (text or "") + _kyiv_context()
+        result = await original_rewrite(request_text, source)
 
         if not isinstance(result, dict):
             return result
