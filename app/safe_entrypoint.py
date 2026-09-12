@@ -11,6 +11,8 @@ from app.compact_chat_runtime import install_compact_chat_runtime
 from app.compact_text_edit import install_compact_text_edit
 from app.config import settings
 from app.editorial_policy_runtime import install_editorial_policy
+from app.miniapp_bot_ui import install_miniapp_bot_ui
+from app.miniapp_server import start_miniapp_server
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
 from app.style_punctuation_runtime import install_punctuation_style
@@ -108,6 +110,10 @@ async def run() -> None:
 
     install_source_whitelist()
 
+    # The Mini App is an additional control surface over the same database and
+    # runtime functions. It does not replace or alter Telegram bot controls.
+    await start_miniapp_server()
+
     from app import admin_bot
     from app.bootstrap import install_application
 
@@ -116,6 +122,7 @@ async def run() -> None:
     def register_publish_ui_with_workspace(app):
         album_register_publish_ui(app)
         install_application(app)
+        install_miniapp_bot_ui(app)
 
     admin_bot.register_publish_ui = register_publish_ui_with_workspace
 
@@ -128,11 +135,14 @@ async def run() -> None:
                 commands = {str(command).lower() for command in (getattr(handler, "commands", None) or set())}
                 if commands & {"testimage", "testedit"}:
                     app.remove_handler(handler, group=group)
-        await app.bot.set_my_commands([
+        commands = [
             ("start", "Відкрити SPORTS NEWS CONTROL"),
             ("menu", "Головне меню"),
-            ("id", "Показати Telegram ID"),
-        ])
+        ]
+        if start_miniapp_server and __import__("app.miniapp_server", fromlist=["miniapp_public_url"]).miniapp_public_url():
+            commands.append(("app", "Відкрити Mini App"))
+        commands.append(("id", "Показати Telegram ID"))
+        await app.bot.set_my_commands(commands)
         return app
 
     admin_bot.start_admin_bot = start_admin_bot_without_test_commands
