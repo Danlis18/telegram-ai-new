@@ -3,6 +3,7 @@ import logging
 
 from app import main as app_main
 from app.album_support import install_album_support
+from app.channel_workspace import install_channel_routing
 from app.config import settings
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
@@ -50,8 +51,12 @@ async def run() -> None:
     # Install media-album support before the admin bot and reader start.
     install_album_support()
 
-    # Keep the persistent DB and runtime parser restricted to the selected
-    # Telegram source whitelist only.
+    # Route every parsed source to its own publication channel. Existing sources
+    # are mapped to the current default channel on first startup.
+    install_channel_routing()
+
+    # Seed the selected default source set and keep join/retry logic active.
+    # Manually added sources are also allowed and survive future restarts.
     install_source_whitelist()
 
     # Ensure the existing multi-user/quota/rejection workspace handlers are
