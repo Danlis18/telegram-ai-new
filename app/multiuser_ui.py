@@ -184,6 +184,13 @@ async def _show_stats(query) -> None:
 
 
 async def _manual_image_edit(update: Update, context: ContextTypes.DEFAULT_TYPE, news_id: int) -> None:
+    """Legacy single-photo editor kept only for old code paths.
+
+    Album posts are intentionally handled by app.album_support, which edits every
+    photo in news_media as one batch. register_multiuser_ui must not intercept
+    regen_image callbacks, otherwise this legacy helper would edit only the first
+    legacy media_file_id.
+    """
     q = update.callback_query
     row = await get_news(news_id)
     if not row or row.get("media_type") != "photo":
@@ -310,8 +317,6 @@ async def account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if data == "stats":
         await _show_stats(q)
         raise ApplicationHandlerStop
-    if data.startswith("regen_image:"):
-        await _manual_image_edit(update, context, int(data.split(":", 1)[1]))
 
 
 async def account_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -384,9 +389,13 @@ async def account_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 def register_multiuser_ui(app: Application) -> None:
+    # IMPORTANT: regen_image is intentionally NOT handled here. The dedicated
+    # album handler in app.album_support owns regen_image/restore/original and
+    # edits every photo stored in news_media. The old multi-user handler edited
+    # only the legacy first media_file_id, which made 2+ photo posts look broken.
     pattern = (
         r"^(users_menu|user_add|user_view:|user_toggle:|channels_menu|sources|target_add|source_add|"
-        r"target_select:|target_delete:|source_delete:|stats$|regen_image:|noop$)"
+        r"target_select:|target_delete:|source_delete:|stats$|noop$)"
     )
     app.add_handler(CallbackQueryHandler(account_callback, pattern=pattern), group=-20)
     app.add_handler(MessageHandler(filters.ALL, account_input_handler), group=-20)
