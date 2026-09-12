@@ -6,6 +6,7 @@ from app import main as app_main
 from app.album_edit_fix import install_album_edit_fix
 from app.album_support import install_album_support
 from app.channel_workspace import install_channel_routing
+from app.compact_chat_runtime import install_compact_chat_runtime
 from app.config import settings
 from app.premium_emoji_support import install_premium_emoji_support
 from app.premium_test_post import run_one_time_premium_test
@@ -89,6 +90,10 @@ async def run() -> None:
     # Albums and batch photo editing.
     install_album_support()
     install_album_edit_fix()
+
+    # Keep the admin chat compact: replace album photos in place, preserve
+    # manually inserted Premium emoji and auto-delete old bot messages after 24h.
+    install_compact_chat_runtime()
 
     # Per-source publication channel routing.
     install_channel_routing()
