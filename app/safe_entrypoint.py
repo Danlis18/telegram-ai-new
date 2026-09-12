@@ -13,6 +13,7 @@ from app.config import settings
 from app.editorial_policy_runtime import install_editorial_policy
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
+from app.style_punctuation_runtime import install_punctuation_style
 from app.telegram_proxy import (
     assert_proxy_ready,
     check_telegram_proxy,
@@ -88,6 +89,8 @@ async def run() -> None:
     # Editorial rules apply after Premium emoji support so all rewrite paths share
     # Kyiv-time conversion and the Russia publication gate.
     install_editorial_policy()
+    # Keep punctuation more natural and avoid repetitive dash-heavy AI phrasing.
+    install_punctuation_style()
     install_album_support()
     install_album_edit_fix()
     install_compact_chat_runtime()
