@@ -72,6 +72,27 @@ async def run() -> None:
 
     admin_bot.register_publish_ui = register_publish_ui_with_workspace
 
+    # Remove old developer-only commands from both Telegram's command menu and
+    # the running handler table. They are no longer part of the production bot.
+    original_start_admin_bot = admin_bot.start_admin_bot
+
+    async def start_admin_bot_without_test_commands():
+        app = await original_start_admin_bot()
+        for group, handlers in list(app.handlers.items()):
+            for handler in list(handlers):
+                commands = {str(command).lower() for command in (getattr(handler, "commands", None) or set())}
+                if commands & {"testimage", "testedit"}:
+                    app.remove_handler(handler, group=group)
+        await app.bot.set_my_commands([
+            ("start", "Відкрити SPORTS NEWS CONTROL"),
+            ("menu", "Головне меню"),
+            ("id", "Показати Telegram ID"),
+        ])
+        return app
+
+    admin_bot.start_admin_bot = start_admin_bot_without_test_commands
+    app_main.start_admin_bot = start_admin_bot_without_test_commands
+
     # app.main calls reader.start(); replace it with a Railway-safe version that
     # only validates the uploaded session and never asks stdin for a phone/code.
     app_main.reader.start = _non_interactive_start
