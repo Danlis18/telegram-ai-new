@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 
 from app import main as app_main
@@ -30,6 +31,42 @@ async def _non_interactive_start() -> None:
     if not authorized:
         raise EOFError(
             "Telegram session is not authorized. Interactive phone login is disabled on Railway."
+        )
+
+    # Resolve the exact Telegram account behind the uploaded reader .session.
+    # This is safe metadata only; never expose the auth key or session contents.
+    me = await app_main.reader.get_me()
+    reader_id = int(getattr(me, "id", 0) or 0)
+    reader_username = (getattr(me, "username", None) or "").strip()
+    reader_name = " ".join(
+        part for part in (
+            (getattr(me, "first_name", None) or "").strip(),
+            (getattr(me, "last_name", None) or "").strip(),
+        )
+        if part
+    )
+    app_main.reader_identity = {
+        "id": reader_id,
+        "username": reader_username,
+        "name": reader_name,
+    }
+    log.info(
+        "Reader authorized account id=%s username=%s name=%s",
+        reader_id,
+        f"@{reader_username}" if reader_username else "(none)",
+        reader_name or "-",
+    )
+
+    if settings.admin_user_id:
+        account_label = f"@{html.escape(reader_username)}" if reader_username else "<i>без @username</i>"
+        name_line = f"\nІм’я: <b>{html.escape(reader_name)}</b>" if reader_name else ""
+        await app_main.notify_user(
+            int(settings.admin_user_id),
+            "👤 <b>Telegram Reader Account</b>\n\n"
+            f"Акаунт: <b>{account_label}</b>\n"
+            f"Telegram ID: <code>{reader_id}</code>"
+            f"{name_line}\n\n"
+            "Це саме той акаунт, чия .session зараз використовується reader-ом.",
         )
 
 
