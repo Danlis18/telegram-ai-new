@@ -50,24 +50,18 @@ async def publish_row(bot, row: dict) -> None:
     if media_type == "photo" and file_id:
         await bot.send_photo(destination, photo=file_id, caption=text, parse_mode="HTML")
     elif media_type == "video" and file_id:
-        await bot.send_video(
-            destination,
-            video=file_id,
-            caption=text,
-            parse_mode="HTML",
-            supports_streaming=True,
-        )
+        await bot.send_video(destination, video=file_id, caption=text, parse_mode="HTML", supports_streaming=True)
     else:
-        await bot.send_message(
-            destination,
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        await bot.send_message(destination, text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def auto_edit_photo(bot, row: dict) -> dict:
     if row.get("media_type") != "photo":
+        return row
+    # Web discovery already creates/cleans a dedicated SPORTS NEWS creative and
+    # stores it as the post media. Running the cleanup editor again would destroy
+    # that finished creative and can remove its intended branding.
+    if str(row.get("source") or "").startswith("web:"):
         return row
 
     user_id = int(row.get("user_id") or settings.admin_user_id or 0)
@@ -84,19 +78,10 @@ async def auto_edit_photo(bot, row: dict) -> dict:
         if not source:
             raise RuntimeError("AUTO_PHOTO_EDIT: Telegram returned empty photo")
 
-        edited = await generate_news_image(
-            row.get("rewritten_text") or row.get("original_text") or "",
-            source_image=source,
-        )
-
+        edited = await generate_news_image(row.get("rewritten_text") or row.get("original_text") or "", source_image=source)
         upload = BytesIO(edited)
         upload.name = f"sports_news_auto_{row['id']}.jpg"
-        sent = await bot.send_photo(
-            user_id,
-            photo=upload,
-            caption=f"🤖 <b>Фото #{row['id']} оброблено автоматично</b>",
-            parse_mode="HTML",
-        )
+        sent = await bot.send_photo(user_id, photo=upload, caption=f"🤖 <b>Фото #{row['id']} оброблено автоматично</b>", parse_mode="HTML")
         edited_file_id = sent.photo[-1].file_id
         await update_news(row["id"], media_file_id=edited_file_id)
         updated = await get_news(row["id"])
@@ -108,24 +93,12 @@ async def process_ready_automation(bot, news_id: int, user_id: int | None = None
         row_probe = await get_news(news_id)
         user_id = int((row_probe or {}).get("user_id") or settings.admin_user_id or 0)
     if not user_id:
-        return {
-            "row": None,
-            "published": False,
-            "photo_edited": False,
-            "photo_error": None,
-            "publish_error": "User workspace missing",
-        }
+        return {"row": None, "published": False, "photo_edited": False, "photo_error": None, "publish_error": "User workspace missing"}
 
     with user_scope(user_id):
         row = await get_news(news_id)
         if not row:
-            return {
-                "row": None,
-                "published": False,
-                "photo_edited": False,
-                "photo_error": "Post not found",
-                "publish_error": None,
-            }
+            return {"row": None, "published": False, "photo_edited": False, "photo_error": "Post not found", "publish_error": None}
 
         photo_edited = False
         photo_error = None
@@ -135,8 +108,9 @@ async def process_ready_automation(bot, news_id: int, user_id: int | None = None
 
         if photo_mode == "auto" and row.get("media_type") == "photo":
             try:
+                original_file = row.get("media_file_id")
                 row = await auto_edit_photo(bot, row)
-                photo_edited = True
+                photo_edited = bool(row.get("media_file_id") != original_file)
             except Exception as exc:
                 photo_error = f"{type(exc).__name__}: {exc}"
                 log.exception("Automatic photo editing failed news_id=%s user_id=%s", news_id, user_id)
@@ -146,21 +120,9 @@ async def process_ready_automation(bot, news_id: int, user_id: int | None = None
                 await publish_row(bot, row)
                 await update_news(news_id, status="published", published_at=utc_now_db(), scheduled_at=None)
                 row = await get_news(news_id)
-                return {
-                    "row": row,
-                    "published": True,
-                    "photo_edited": photo_edited,
-                    "photo_error": None,
-                    "publish_error": None,
-                }
+                return {"row": row, "published": True, "photo_edited": photo_edited, "photo_error": None, "publish_error": None}
             except Exception as exc:
                 publish_error = f"{type(exc).__name__}: {exc}"
                 log.exception("Automatic publish failed news_id=%s user_id=%s", news_id, user_id)
 
-        return {
-            "row": row,
-            "published": False,
-            "photo_edited": photo_edited,
-            "photo_error": photo_error,
-            "publish_error": publish_error,
-        }
+        return {"row": row, "published": False, "photo_edited": photo_edited, "photo_error": photo_error, "publish_error": publish_error}
