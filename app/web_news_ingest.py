@@ -2,14 +2,14 @@ import asyncio
 import hashlib
 import html
 import logging
-import math
 import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlparse
+from io import BytesIO
+from urllib.parse import urljoin
 
 import aiosqlite
 import httpx
@@ -62,6 +62,7 @@ class WebItem:
     summary: str
     published: datetime
     authority: float
+    image_url: str = ""
 
 
 @dataclass
@@ -79,10 +80,6 @@ class Cluster:
     @property
     def title(self) -> str:
         return self.newest.title
-
-    @property
-    def summary(self) -> str:
-        return max((item.summary for item in self.items), key=len, default="")
 
 
 def _strip_html(value: str) -> str:
@@ -123,6 +120,19 @@ def _node_text(node, names: tuple[str, ...]) -> str:
     return ""
 
 
+def _node_image(node, base_url: str) -> str:
+    for child in node.iter():
+        tag = child.tag.split("}")[-1].lower()
+        url = str(child.attrib.get("url") or child.attrib.get("href") or "").strip()
+        mime = str(child.attrib.get("type") or "").lower()
+        medium = str(child.attrib.get("medium") or "").lower()
+        if url and (tag in {"thumbnail", "image"} or medium == "image" or mime.startswith("image/")):
+            return urljoin(base_url, url)
+    raw = ET.tostring(node, encoding="unicode", method="html")
+    match = re.search(r'<img[^>]+src=["\']([^"\']+)', raw, re.I)
+    return urljoin(base_url, html.unescape(match.group(1))) if match else ""
+
+
 def _parse_feed(content: bytes, source: str, authority: float) -> list[WebItem]:
     try:
         root = ET.fromstring(content)
@@ -137,7 +147,7 @@ def _parse_feed(content: bytes, source: str, authority: float) -> list[WebItem]:
         date_raw = _node_text(node, ("pubdate", "published", "updated", "date"))
         if not title or not link:
             continue
-        result.append(WebItem(source, link.strip(), title[:500], summary[:1800], _parse_date(date_raw), authority))
+        result.append(WebItem(source, link.strip(), title[:500], summary[:1800], _parse_date(date_raw), authority, _node_image(node, link)))
     return result
 
 
@@ -158,10 +168,7 @@ def _tokens(value: str) -> set[str]:
 
 def _similarity(a: str, b: str) -> float:
     aa, bb = _tokens(a), _tokens(b)
-    if not aa or not bb:
-        return 0.0
-    inter = len(aa & bb)
-    return inter / max(1, min(len(aa), len(bb)))
+    return len(aa & bb) / max(1, min(len(aa), len(bb))) if aa and bb else 0.0
 
 
 def _relevance_text(item: WebItem) -> str:
@@ -169,16 +176,12 @@ def _relevance_text(item: WebItem) -> str:
 
 
 def _sport_relevance(item: WebItem) -> int:
-    text = _relevance_text(item)
-    hits = sum(1 for hint in SPORT_HINTS if hint in text)
-    return min(18, hits * 4)
+    return min(18, sum(1 for hint in SPORT_HINTS if hint in _relevance_text(item)) * 4)
 
 
 def _hotness(item: WebItem) -> int:
     text = _relevance_text(item)
-    hits = sum(1 for hint in HOT_HINTS if hint in text)
-    low = sum(1 for hint in LOW_VALUE_HINTS if hint in text)
-    return min(18, hits * 4) - low * 7
+    return min(18, sum(1 for hint in HOT_HINTS if hint in text) * 4) - sum(1 for hint in LOW_VALUE_HINTS if hint in text) * 7
 
 
 def _cluster_score(cluster: Cluster, now: datetime, max_age_h: float) -> float:
@@ -187,21 +190,17 @@ def _cluster_score(cluster: Cluster, now: datetime, max_age_h: float) -> float:
     freshness = max(0.0, 34.0 * (1.0 - age_h / max_age_h))
     corroboration = min(22.0, max(0, len(cluster.sources) - 1) * 9.0)
     authority = max(item.authority for item in cluster.items) * 15.0
-    relevance = _sport_relevance(newest)
-    hotness = _hotness(newest)
-    return freshness + corroboration + authority + relevance + hotness
+    return freshness + corroboration + authority + _sport_relevance(newest) + _hotness(newest)
 
 
 def _cluster_items(items: list[WebItem]) -> list[Cluster]:
     clusters: list[Cluster] = []
     for item in sorted(items, key=lambda x: x.published, reverse=True):
-        placed = False
         for cluster in clusters:
             if _similarity(item.title, cluster.title) >= 0.48:
                 cluster.items.append(item)
-                placed = True
                 break
-        if not placed:
+        else:
             clusters.append(Cluster([item]))
     return clusters
 
@@ -209,18 +208,10 @@ def _cluster_items(items: list[WebItem]) -> list[Cluster]:
 async def fetch_ranked_web_news(limit: int = 8) -> list[tuple[Cluster, float]]:
     max_age_h = float(os.getenv("WEB_NEWS_MAX_AGE_HOURS") or "12")
     now = datetime.now(timezone.utc)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; AutoPostingSports/1.0; +https://t.me/sports_news_ua)",
-        "Accept": "application/rss+xml,application/xml,text/xml,text/html;q=0.8,*/*;q=0.5",
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; AutoPostingSports/1.0)", "Accept": "application/rss+xml,application/xml,text/xml,text/html;q=0.8,*/*;q=0.5"}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
         groups = await asyncio.gather(*[_fetch_feed(client, *feed) for feed in FEEDS])
-    items = []
-    for group in groups:
-        for item in group:
-            age_h = (now - item.published).total_seconds() / 3600
-            if -0.5 <= age_h <= max_age_h and _sport_relevance(item) > 0:
-                items.append(item)
+    items = [item for group in groups for item in group if -0.5 <= (now - item.published).total_seconds() / 3600 <= max_age_h and _sport_relevance(item) > 0]
     ranked = [(cluster, _cluster_score(cluster, now, max_age_h)) for cluster in _cluster_items(items)]
     ranked.sort(key=lambda pair: pair[1], reverse=True)
     return ranked[: max(1, int(limit))]
@@ -232,68 +223,130 @@ async def _near_duplicate(user_id: int, title: str) -> bool:
         return False
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=30)).strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(settings.database_path) as db:
-        cur = await db.execute(
-            "SELECT original_text,rewritten_text FROM news WHERE user_id=? AND created_at>=? ORDER BY id DESC LIMIT 180",
-            (int(user_id), cutoff),
-        )
+        cur = await db.execute("SELECT original_text,rewritten_text FROM news WHERE user_id=? AND created_at>=? ORDER BY id DESC LIMIT 180", (int(user_id), cutoff))
         rows = await cur.fetchall()
     for original, rewritten in rows:
-        probe = f"{original or ''} {rewritten or ''}"
-        probe_tokens = _tokens(probe)
-        if not probe_tokens:
-            continue
-        overlap = len(title_tokens & probe_tokens) / max(1, len(title_tokens))
-        if overlap >= 0.74:
+        probe_tokens = _tokens(f"{original or ''} {rewritten or ''}")
+        if probe_tokens and len(title_tokens & probe_tokens) / max(1, len(title_tokens)) >= 0.74:
             return True
     return False
 
 
 def _source_key(cluster: Cluster) -> str:
-    primary = cluster.newest.source.casefold()
-    primary = re.sub(r"[^a-z0-9]+", "_", primary).strip("_")[:30]
+    primary = re.sub(r"[^a-z0-9]+", "_", cluster.newest.source.casefold()).strip("_")[:30]
     return f"web:{primary or 'sports'}"
 
 
 def _synthetic_message_id(cluster: Cluster) -> int:
-    digest = hashlib.sha256((cluster.newest.url + cluster.title).encode("utf-8")).hexdigest()
-    return int(digest[:12], 16) % 2_000_000_000
+    return int(hashlib.sha256((cluster.newest.url + cluster.title).encode()).hexdigest()[:12], 16) % 2_000_000_000
 
 
 def _ai_input(cluster: Cluster, score: float) -> str:
-    sources = ", ".join(sorted(cluster.sources))
     source_lines = []
     for item in sorted(cluster.items, key=lambda x: x.published, reverse=True)[:4]:
         source_lines.append(f"• {item.source}: {item.title}\n{item.summary[:650]}")
     return (
-        "ІНТЕРНЕТ-НОВИНА. Нижче зібрані свіжі сигнали з незалежних спортивних джерел. "
-        "Перепиши тільки факти, які реально випливають із матеріалів. Не вигадуй деталей.\n\n"
-        f"Внутрішній рейтинг актуальності/цікавості: {score:.0f}/100+\n"
-        f"Джерела: {sources}\n\n" + "\n\n".join(source_lines)
+        "ІНТЕРНЕТ-НОВИНА. Перепиши тільки підтверджені факти. УВЕСЬ готовий пост має бути українською: "
+        "переклади також прямі цитати, blockquote і будь-які англомовні речення; не залишай англійський текст, крім власних назв і загальновідомих назв турнірів/брендів. "
+        "Готовий Telegram-пост тримай компактним, бажано до 650 символів, щоб він поміщався під креативом.\n\n"
+        f"WebRank: {score:.0f}\nДжерела: {', '.join(sorted(cluster.sources))}\n\n" + "\n\n".join(source_lines)
     )
 
 
 async def _daily_web_count(user_id: int) -> int:
     async with aiosqlite.connect(settings.database_path) as db:
-        cur = await db.execute(
-            """SELECT COUNT(*) FROM news WHERE user_id=? AND source LIKE 'web:%'
-               AND created_at>=datetime('now','start of day') AND status IN ('ready','scheduled','published')""",
-            (int(user_id),),
-        )
+        cur = await db.execute("SELECT COUNT(*) FROM news WHERE user_id=? AND source LIKE 'web:%' AND created_at>=datetime('now','start of day') AND status IN ('ready','scheduled','published')", (int(user_id),))
         return int((await cur.fetchone())[0])
+
+
+async def _web_enabled(user_id: int) -> bool:
+    from app.database import get_setting
+    with user_scope(user_id):
+        return (await get_setting("web_sources_enabled", "true") or "true").lower() == "true"
+
+
+async def _web_limits(user_id: int) -> tuple[float, int]:
+    from app.database import get_setting
+    with user_scope(user_id):
+        score = float(await get_setting("web_min_score", os.getenv("WEB_NEWS_MIN_SCORE") or "62") or 62)
+        daily = int(await get_setting("web_max_per_day", os.getenv("WEB_NEWS_MAX_PER_DAY") or "8") or 8)
+    return max(40.0, min(95.0, score)), max(1, min(20, daily))
+
+
+async def _extract_article_image(item: WebItem) -> str:
+    if item.image_url:
+        return item.image_url
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=16) as client:
+            r = await client.get(item.url)
+            r.raise_for_status()
+            text = r.text[:800_000]
+        patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)',
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, re.I)
+            if m:
+                return urljoin(item.url, html.unescape(m.group(1)))
+    except Exception:
+        log.debug("Could not extract article image url=%s", item.url, exc_info=True)
+    return ""
+
+
+async def _download_image(url: str) -> bytes | None:
+    if not url:
+        return None
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True, timeout=22) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            ctype = (r.headers.get("content-type") or "").lower()
+            if "image" not in ctype or len(r.content) < 10_000 or len(r.content) > 15_000_000:
+                return None
+            return r.content
+    except Exception:
+        return None
+
+
+async def _make_creative(cluster: Cluster, rewritten: str) -> bytes:
+    from app.ai_editor import generate_news_image
+    source_bytes = None
+    for item in sorted(cluster.items, key=lambda x: x.published, reverse=True):
+        source_bytes = await _download_image(await _extract_article_image(item))
+        if source_bytes:
+            break
+    if source_bytes:
+        try:
+            return await generate_news_image(rewritten, source_image=source_bytes)
+        except Exception:
+            log.exception("Could not clean source web image; generating original creative")
+    return await generate_news_image(rewritten)
+
+
+def _preview_caption(rewritten: str, news_id: int, sources: str, ai_score: int, web_score: float) -> str:
+    from app.formatting import post_html
+    body = post_html(rewritten)
+    header = f"🌐 <b>Готовий web-пост #{news_id}</b>\nДжерела: <b>{html.escape(sources[:140])}</b>\n🧠 AI: <b>{ai_score}%</b> · WebRank: <b>{web_score:.0f}</b>\n\n"
+    plain_len = len(re.sub(r"<[^>]+>", "", header + body))
+    if plain_len <= 1000:
+        return header + body
+    plain = re.sub(r"<[^>]+>", "", rewritten).strip()
+    return header + html.escape(plain[:700] + ("…" if len(plain) > 700 else ""))
 
 
 async def process_web_news_once(user_id: int | None = None) -> dict:
     from app import main as app_main
     from app.ai_editor import is_advertising_post, rewrite_news
     from app.content_policy import can_accept_candidate, candidate_matches_preferences, cooldown_state
-    from app.database import get_news, save, update_news
-    from app.formatting import post_html
+    from app.database import save, update_news
     from app.publishing import process_ready_automation
 
     user_id = int(user_id or settings.admin_user_id or 0)
-    if not user_id:
-        return {"ok": False, "reason": "owner_not_configured"}
-    max_daily = max(1, min(20, int(os.getenv("WEB_NEWS_MAX_PER_DAY") or "8")))
+    if not user_id or not await _web_enabled(user_id):
+        return {"ok": True, "reason": "disabled"}
+    threshold, max_daily = await _web_limits(user_id)
     if await _daily_web_count(user_id) >= max_daily:
         return {"ok": True, "reason": "daily_cap"}
 
@@ -301,34 +354,25 @@ async def process_web_news_once(user_id: int | None = None) -> dict:
         allowed, period, _, _ = await can_accept_candidate(user_id)
         if not allowed or not period:
             return {"ok": True, "reason": "quota"}
-        cooldown = await cooldown_state(user_id, period)
-        if not cooldown.get("allowed"):
+        if not (await cooldown_state(user_id, period)).get("allowed"):
             return {"ok": True, "reason": "cooldown"}
 
     ranked = await fetch_ranked_web_news(10)
-    threshold = float(os.getenv("WEB_NEWS_MIN_SCORE") or "62")
-    accepted = 0
     for cluster, web_score in ranked:
-        if web_score < threshold:
+        if web_score < threshold or await _near_duplicate(user_id, cluster.title):
             continue
-        if await _near_duplicate(user_id, cluster.title):
-            continue
-
         source = _source_key(cluster)
         raw = _ai_input(cluster, web_score)
-        advertising, _ = is_advertising_post(raw)
-        if advertising:
+        if is_advertising_post(raw)[0]:
             continue
 
         with user_scope(user_id):
-            keep, preference_reason = await candidate_matches_preferences(raw, source, user_id)
+            keep, _ = await candidate_matches_preferences(raw, source, user_id)
             if not keep:
-                log.info("Web candidate rejected by learned preference source=%s: %s", source, preference_reason)
                 continue
-            allowed, period, _, _ = await can_accept_candidate(user_id)
+            allowed, _, _, _ = await can_accept_candidate(user_id)
             if not allowed:
                 break
-
             news_id = await save(source, _synthetic_message_id(cluster), raw, "", 0, "received")
             if not news_id:
                 continue
@@ -341,42 +385,53 @@ async def process_web_news_once(user_id: int | None = None) -> dict:
                 if not publishable:
                     continue
 
+                # HARD RULE: a web item never reaches the moderator without media.
+                creative = await _make_creative(cluster, rewritten)
+                buf = BytesIO(creative)
+                buf.name = f"sports_news_web_{news_id}.jpg"
+                sources = ", ".join(sorted(cluster.sources))
+                sent = await app_main.publisher.send_photo(
+                    int(user_id),
+                    photo=buf,
+                    caption=_preview_caption(rewritten, news_id, sources, ai_score, web_score),
+                    parse_mode="HTML",
+                    reply_markup=app_main.action_buttons(news_id, "photo"),
+                )
+                file_id = sent.photo[-1].file_id
+                await update_news(news_id, media_type="photo", media_file_id=file_id, original_media_file_id=file_id)
+
                 automation = await process_ready_automation(app_main.publisher, news_id, user_id)
                 if automation.get("published"):
-                    await app_main.notify_user(
-                        user_id,
-                        f"🌐 <b>Web-пост #{news_id} опубліковано автоматично</b>\n"
-                        f"🧠 AI: <b>{ai_score}%</b> · WebRank: <b>{web_score:.0f}</b>",
-                    )
-                else:
-                    await app_main.notify_user(
-                        user_id,
-                        f"🌐 <b>Готовий web-пост #{news_id}</b>\n"
-                        f"Джерела: <b>{html.escape(', '.join(sorted(cluster.sources))[:160])}</b>\n"
-                        f"🧠 AI: <b>{ai_score}%</b> · WebRank: <b>{web_score:.0f}</b>\n\n"
-                        f"{post_html(rewritten)}",
-                        app_main.action_buttons(news_id, None),
-                    )
-                accepted += 1
-            except Exception:
+                    try:
+                        await sent.edit_caption(
+                            caption=f"✅ <b>Web-пост #{news_id} опубліковано автоматично</b>\n🧠 AI: <b>{ai_score}%</b> · WebRank: <b>{web_score:.0f}</b>",
+                            parse_mode="HTML",
+                            reply_markup=None,
+                        )
+                    except Exception:
+                        pass
+                return {"ok": True, "accepted": 1, "ranked": len(ranked), "media": True}
+            except Exception as exc:
                 await update_news(news_id, status="ai_error")
-                log.exception("Web candidate AI processing failed news_id=%s", news_id)
-
-        # One high-quality web item per scan is deliberate; normal period quotas and
-        # cooldown then keep Telegram + web content balanced rather than flooding.
-        if accepted >= 1:
-            break
-    return {"ok": True, "accepted": accepted, "ranked": len(ranked)}
+                log.exception("Web candidate processing/creative failed news_id=%s", news_id)
+                # Never fall back to a bare text preview. It can retry next scan.
+                continue
+    return {"ok": True, "accepted": 0, "ranked": len(ranked)}
 
 
 async def web_news_worker() -> None:
+    from app.database import list_users
     initial = max(20, min(300, int(os.getenv("WEB_NEWS_INITIAL_DELAY_SECONDS") or "75")))
     interval = max(300, min(3600, int(os.getenv("WEB_NEWS_INTERVAL_SECONDS") or "900")))
     await asyncio.sleep(initial)
     while True:
         try:
-            result = await process_web_news_once()
-            log.info("Web sports discovery iteration: %s", result)
+            for row in await list_users(active_only=True):
+                uid = int(row.get("telegram_user_id") or 0)
+                if uid:
+                    result = await process_web_news_once(uid)
+                    log.info("Web sports discovery user=%s: %s", uid, result)
+                    await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             raise
         except Exception:
