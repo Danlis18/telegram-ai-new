@@ -7,6 +7,7 @@ from app.auth import is_authorized_id
 from app.channel_workspace import ensure_channel_route_schema, register_channel_workspace_ui
 from app.channel_workspace_compact import install_compact_channel_page
 from app.content_policy import ensure_policy_schema
+from app.external_ai_ui import register_external_ai_ui
 from app.id_ui import register_id_handler
 from app.multiuser_ui import main_menu as base_main_menu, register_multiuser_ui, shared_guard
 from app.quota_ui import register_quota_ui
@@ -19,7 +20,8 @@ def enhanced_main_menu() -> InlineKeyboardMarkup:
     markup = base_main_menu()
     rows = [list(row) for row in markup.inline_keyboard]
     insert_at = max(0, len(rows) - 1)
-    rows.insert(insert_at, [InlineKeyboardButton("📊 Ліміти постів", callback_data="quota_settings")])
+    rows.insert(insert_at, [InlineKeyboardButton("🌐 Web / AI", callback_data="external_ai")])
+    rows.insert(insert_at + 1, [InlineKeyboardButton("📊 Ліміти постів", callback_data="quota_settings")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -31,11 +33,8 @@ def install_application(app: Application) -> None:
     register_id_handler(app)
     register_rejection_ui(app)
     register_quota_ui(app)
-    # Keep the main channels screen compact: source lists live inside each
-    # publication channel's gear/settings view.
+    register_external_ai_ui(app)
     install_compact_channel_page()
-    # Register before the legacy channels UI so the new split workspace catches
-    # channels_menu/source routing callbacks first.
     register_channel_workspace_ui(app)
     register_multiuser_ui(app)
     install_reader_policy(app)
