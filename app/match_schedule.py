@@ -1,9 +1,7 @@
 import asyncio
-import html
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -19,7 +17,6 @@ log = logging.getLogger("telegram-ai-news.match-schedule")
 
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
 
-# Structured fixture sources only; failures are isolated league-by-league.
 LEAGUES = [
     ("uefa.champions", "Ліга чемпіонів", "🏆", 42),
     ("eng.1", "Прем'єр-ліга", "🏴", 36),
@@ -35,8 +32,6 @@ LEAGUES = [
     ("ita.coppa_italia", "Кубок Італії", "🏆", 22),
 ]
 
-# Higher values make a fixture more likely to enter the top-5. This is deliberately
-# conservative: unknown clubs can still qualify through a high-priority competition.
 TEAM_WEIGHT = {
     "real madrid": 18, "barcelona": 18, "manchester city": 18, "manchester united": 17,
     "liverpool": 18, "arsenal": 17, "chelsea": 16, "tottenham hotspur": 14,
@@ -170,7 +165,6 @@ async def fetch_top_fixtures(limit: int = 5, now: datetime | None = None) -> lis
             kickoff_local = fixture.kickoff.astimezone(_tz())
             if kickoff_local.date() != local_now.date() or fixture.completed:
                 continue
-            # Keep a match that has just started, but never include a stale fixture.
             if kickoff_local < local_now - timedelta(minutes=35):
                 continue
             previous = by_id.get(fixture.event_id)
@@ -203,8 +197,8 @@ async def render_fixtures_post(fixtures: list[Fixture], now: datetime | None = N
         home_icon = await resolve_emoji([home_uk, fixture.home], "⚽")
         away_icon = await resolve_emoji([away_uk, fixture.away], "⚽")
         kickoff = fixture.kickoff.astimezone(_tz()).strftime("%H:%M")
-        lines.append(f"{league_icon} <b>{html.escape(fixture.league_name)}</b>")
-        lines.append(f"⏰ <b>{kickoff}</b>  {home_icon} <b>{html.escape(home_uk)}</b> — {away_icon} <b>{html.escape(away_uk)}</b>")
+        lines.append(f"{league_icon} <b>{fixture.league_name}</b>")
+        lines.append(f"⏰ <b>{kickoff}</b>  {home_icon} <b>{home_uk}</b> — {away_icon} <b>{away_uk}</b>")
         lines.append("")
     lines.append("Зберігай розклад, щоб не пропустити головне 👀")
     return "\n".join(lines).strip()
@@ -301,6 +295,9 @@ async def publish_daily_fixtures_once(user_id: int | None = None) -> dict:
 
 async def match_schedule_worker() -> None:
     await ensure_match_schedule_schema()
+    # Give Telegram backfill a moment to teach the semantic Premium emoji registry
+    # before today's schedule is rendered for the first time after a deployment.
+    await asyncio.sleep(max(30, min(300, int(os.getenv("DAILY_FIXTURES_INITIAL_DELAY_SECONDS") or "150"))))
     while True:
         try:
             local_now = datetime.now(_tz())
