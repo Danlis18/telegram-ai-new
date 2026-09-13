@@ -11,11 +11,13 @@ from app.compact_chat_runtime import install_compact_chat_runtime
 from app.compact_text_edit import install_compact_text_edit
 from app.config import settings
 from app.editorial_policy_runtime import install_editorial_policy
+from app.match_schedule import start_match_schedule_worker
 from app.miniapp_bot_ui import install_miniapp_bot_ui
 from app.miniapp_channel_enhancements import install_channel_miniapp_enhancements
 from app.miniapp_server import start_miniapp_server
 from app.miniapp_url_fix import install_miniapp_url_fallback
 from app.persistence_runtime import prepare_persistence, start_persistence_backup_worker, storage_status
+from app.premium_emoji_registry import install_telegram_emoji_learning, learn_from_existing_content
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
 from app.style_punctuation_runtime import install_punctuation_style
@@ -29,6 +31,7 @@ from app.user_publisher import (
     install_user_publisher,
     install_user_publisher_status_runtime,
 )
+from app.web_news_ingest import start_web_news_worker
 
 log = logging.getLogger("telegram-ai-news.safe-entrypoint")
 
@@ -109,6 +112,12 @@ async def run() -> None:
     install_compact_text_edit()
     install_channel_routing()
 
+    # Learn semantic aliases for Premium/custom emoji without altering the existing
+    # Telegram parsing flow. The registry is reused by the daily match schedule so
+    # team/league logos can be rendered as real custom emoji when they were seen before.
+    install_telegram_emoji_learning(app_main)
+    await learn_from_existing_content()
+
     # Premium user publisher is initialized only as the transport for real news.
     # No startup/test/demo/channel message is ever sent automatically.
     install_user_publisher()
@@ -130,6 +139,13 @@ async def run() -> None:
     # The Mini App is an additional control surface over the same database and
     # runtime functions. It does not replace or alter Telegram bot controls.
     await start_miniapp_server()
+
+    # New sports discovery layer. Daily fixtures are posted once per Kyiv day after
+    # the configured morning time. Web discovery compares several independent RSS/
+    # sports sources, ranks freshness + interest, then sends only AI-approved items
+    # through the same ready-post workflow and existing quotas/cooldowns.
+    start_match_schedule_worker()
+    start_web_news_worker()
 
     from telegram import MenuButtonWebApp, WebAppInfo
     from app import admin_bot
