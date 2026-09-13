@@ -11,7 +11,9 @@ from app.compact_chat_runtime import install_compact_chat_runtime
 from app.compact_text_edit import install_compact_text_edit
 from app.config import settings
 from app.editorial_policy_runtime import install_editorial_policy
+from app.external_control_api import install_external_control_api
 from app.match_schedule import start_match_schedule_worker
+from app.match_schedule_controls import install_match_schedule_controls
 from app.miniapp_bot_ui import install_miniapp_bot_ui
 from app.miniapp_channel_enhancements import install_channel_miniapp_enhancements
 from app.miniapp_server import start_miniapp_server
@@ -21,52 +23,30 @@ from app.premium_emoji_registry import install_telegram_emoji_learning, learn_fr
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
 from app.style_punctuation_runtime import install_punctuation_style
-from app.telegram_proxy import (
-    assert_proxy_ready,
-    check_telegram_proxy,
-    install_proxy_status_runtime,
-)
-from app.user_publisher import (
-    initialize_user_publisher,
-    install_user_publisher,
-    install_user_publisher_status_runtime,
-)
+from app.telegram_proxy import assert_proxy_ready, check_telegram_proxy, install_proxy_status_runtime
+from app.ukrainian_output_runtime import install_ukrainian_output_policy
+from app.user_ai_runtime import install_user_ai_runtime
+from app.user_publisher import initialize_user_publisher, install_user_publisher, install_user_publisher_status_runtime
 from app.web_news_ingest import start_web_news_worker
 
 log = logging.getLogger("telegram-ai-news.safe-entrypoint")
 
 
 async def _non_interactive_start() -> None:
-    """Connect Telegram reader without ever prompting for phone/code on Railway."""
     assert_proxy_ready()
     await app_main.reader.connect()
     authorized = await app_main.reader.is_user_authorized()
     if not authorized:
-        raise EOFError(
-            "Telegram session is not authorized. Interactive phone login is disabled on Railway."
-        )
+        raise EOFError("Telegram session is not authorized. Interactive phone login is disabled on Railway.")
 
     me = await app_main.reader.get_me()
     reader_id = int(getattr(me, "id", 0) or 0)
     reader_username = (getattr(me, "username", None) or "").strip()
     reader_name = " ".join(
-        part for part in (
-            (getattr(me, "first_name", None) or "").strip(),
-            (getattr(me, "last_name", None) or "").strip(),
-        )
-        if part
+        part for part in ((getattr(me, "first_name", None) or "").strip(), (getattr(me, "last_name", None) or "").strip()) if part
     )
-    app_main.reader_identity = {
-        "id": reader_id,
-        "username": reader_username,
-        "name": reader_name,
-    }
-    log.info(
-        "Reader authorized account id=%s username=%s name=%s",
-        reader_id,
-        f"@{reader_username}" if reader_username else "(none)",
-        reader_name or "-",
-    )
+    app_main.reader_identity = {"id": reader_id, "username": reader_username, "name": reader_name}
+    log.info("Reader authorized account id=%s username=%s name=%s", reader_id, f"@{reader_username}" if reader_username else "(none)", reader_name or "-")
 
     if settings.admin_user_id:
         account_label = f"@{html.escape(reader_username)}" if reader_username else "<i>без @username</i>"
@@ -75,36 +55,29 @@ async def _non_interactive_start() -> None:
             int(settings.admin_user_id),
             "👤 <b>Telegram Reader Account</b>\n\n"
             f"Акаунт: <b>{account_label}</b>\n"
-            f"Telegram ID: <code>{reader_id}</code>"
-            f"{name_line}\n\n"
+            f"Telegram ID: <code>{reader_id}</code>{name_line}\n\n"
             "Це саме той акаунт, чия .session зараз використовується reader-ом.",
         )
 
 
 async def run() -> None:
-    # Resolve database storage before any workspace/database operations. On Railway
-    # a mounted Volume is used automatically and a rolling SQLite snapshot is kept
-    # on the same durable storage. Existing legacy data is migrated on first boot.
     await prepare_persistence()
     start_persistence_backup_worker()
     log.info("Storage status: %s", storage_status())
 
     proxy_state = await check_telegram_proxy(settings)
-    log.info(
-        "Telegram proxy startup status=%s configured=%s endpoint=%s",
-        proxy_state.get("status"),
-        proxy_state.get("configured"),
-        proxy_state.get("endpoint") or "-",
-    )
+    log.info("Telegram proxy startup status=%s configured=%s endpoint=%s", proxy_state.get("status"), proxy_state.get("configured"), proxy_state.get("endpoint") or "-")
 
     install_proxy_status_runtime(app_main)
     install_user_publisher_status_runtime(app_main)
 
+    # Route every OpenAI text/image call through the currently active user workspace.
+    # A user's encrypted API key is used when configured; otherwise Railway's shared key remains the fallback.
+    install_user_ai_runtime()
+
     install_premium_emoji_support()
-    # Editorial rules apply after Premium emoji support so all rewrite paths share
-    # Kyiv-time conversion and the Russia publication gate.
     install_editorial_policy()
-    # Keep punctuation more natural and avoid repetitive dash-heavy AI phrasing.
+    install_ukrainian_output_policy()
     install_punctuation_style()
     install_album_support()
     install_album_edit_fix()
@@ -112,38 +85,23 @@ async def run() -> None:
     install_compact_text_edit()
     install_channel_routing()
 
-    # Learn semantic aliases for Premium/custom emoji without altering the existing
-    # Telegram parsing flow. The registry is reused by the daily match schedule so
-    # team/league logos can be rendered as real custom emoji when they were seen before.
     install_telegram_emoji_learning(app_main)
     await learn_from_existing_content()
 
-    # Premium user publisher is initialized only as the transport for real news.
-    # No startup/test/demo/channel message is ever sent automatically.
     install_user_publisher()
     await initialize_user_publisher()
-
-    # User explicitly requested removal of the old Premium/test diagnostics.
-    # This only deletes known test posts; it never sends anything to the channel.
     await remove_old_test_posts()
 
     install_source_whitelist()
-
-    # Railway's public domain can be created after a deployment. Resolve it here,
-    # with the current production domain as a safe fallback, before bot menus are built.
+    install_match_schedule_controls()
     install_miniapp_url_fallback()
-
-    # Extra Mini App APIs are additive: avatars, hidden channel actions and storage health.
     install_channel_miniapp_enhancements()
+    install_external_control_api()
 
-    # The Mini App is an additional control surface over the same database and
-    # runtime functions. It does not replace or alter Telegram bot controls.
     await start_miniapp_server()
 
-    # New sports discovery layer. Daily fixtures are posted once per Kyiv day after
-    # the configured morning time. Web discovery compares several independent RSS/
-    # sports sources, ranks freshness + interest, then sends only AI-approved items
-    # through the same ready-post workflow and existing quotas/cooldowns.
+    # Independent workers. Both honor per-user switches; web discovery additionally
+    # requires a branded creative before a candidate can ever reach the moderator.
     start_match_schedule_worker()
     start_web_news_worker()
 
@@ -161,7 +119,6 @@ async def run() -> None:
         install_miniapp_bot_ui(app)
 
     admin_bot.register_publish_ui = register_publish_ui_with_workspace
-
     original_start_admin_bot = admin_bot.start_admin_bot
 
     async def start_admin_bot_without_test_commands():
@@ -171,26 +128,16 @@ async def run() -> None:
                 commands = {str(command).lower() for command in (getattr(handler, "commands", None) or set())}
                 if commands & {"testimage", "testedit"}:
                     app.remove_handler(handler, group=group)
-        commands = [
-            ("start", "Відкрити SPORTS NEWS CONTROL"),
-            ("menu", "Головне меню"),
-        ]
+        commands = [("start", "Відкрити SPORTS NEWS CONTROL"), ("menu", "Головне меню")]
         app_url = miniapp_public_url()
         if app_url:
             commands.append(("app", "Відкрити Mini App"))
         commands.append(("id", "Показати Telegram ID"))
         await app.bot.set_my_commands(commands)
 
-        # Persistent Mini App launcher. Set both the global default and explicit
-        # per-user buttons so Telegram clients with an older cached menu state are
-        # updated immediately. Mini App auth still blocks unauthorized users.
         if app_url:
-            menu_button = MenuButtonWebApp(
-                text="OPEN",
-                web_app=WebAppInfo(url=app_url),
-            )
+            menu_button = MenuButtonWebApp(text="OPEN", web_app=WebAppInfo(url=app_url))
             await app.bot.set_chat_menu_button(menu_button=menu_button)
-
             chat_ids: set[int] = set()
             if settings.admin_user_id:
                 chat_ids.add(int(settings.admin_user_id))
@@ -201,19 +148,16 @@ async def run() -> None:
                         chat_ids.add(user_id)
             except Exception:
                 log.exception("Could not enumerate users while configuring Mini App menu buttons")
-
             for chat_id in chat_ids:
                 try:
                     await app.bot.set_chat_menu_button(chat_id=chat_id, menu_button=menu_button)
                 except Exception:
                     log.exception("Could not configure Mini App OPEN button for chat_id=%s", chat_id)
-
             log.info("Mini App OPEN button configured globally and for %d active chats url=%s", len(chat_ids), app_url)
         return app
 
     admin_bot.start_admin_bot = start_admin_bot_without_test_commands
     app_main.start_admin_bot = start_admin_bot_without_test_commands
-
     app_main.reader.start = _non_interactive_start
     await app_main.main()
 
