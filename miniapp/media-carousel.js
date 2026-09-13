@@ -96,7 +96,6 @@
     const restartProgress = () => {
       if (!fill || !multi) return;
       fill.style.animation = 'none';
-      // Force layout so the 5s animation restarts from zero.
       void fill.offsetHeight;
       fill.style.animation = `luxMediaClock ${AUTOPLAY_MS}ms linear forwards`;
     };
@@ -148,7 +147,6 @@
     stage?.addEventListener('touchstart', onTouchStart, {passive: true});
     stage?.addEventListener('touchend', onTouchEnd, {passive: true});
 
-    // Desktop/tablet convenience: wheel horizontally over the media.
     const onWheel = event => {
       if (!multi || Math.abs(event.deltaX) < 16 || Math.abs(event.deltaX) < Math.abs(event.deltaY)) return;
       event.preventDefault();
@@ -162,7 +160,6 @@
     };
     document.addEventListener('visibilitychange', onVisibility);
 
-    // Wait for the first image dimensions only to make the reveal feel stable.
     const firstImage = $('img', slides[0]);
     if (firstImage) {
       const markReady = () => host.classList.add('media-ready');
@@ -202,7 +199,6 @@
       if (token !== renderToken || sheet.classList.contains('hidden')) return;
       createCarousel(host, post);
     } catch (_) {
-      // Never break the existing post sheet if the enhancement request fails.
       host.classList.add('lux-media-safe');
     }
   }
@@ -233,4 +229,21 @@
   }
 
   install();
+})();
+
+(() => {
+  if (!document.querySelector('link[data-external-ai-style]')) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = './external-control.css?v=1';
+    link.dataset.externalAiStyle = '1';
+    document.head.appendChild(link);
+  }
+  if (!document.querySelector('script[data-external-ai-script]')) {
+    const script = document.createElement('script');
+    script.src = './external-control.js?v=1';
+    script.defer = true;
+    script.dataset.externalAiScript = '1';
+    document.head.appendChild(script);
+  }
 })();
