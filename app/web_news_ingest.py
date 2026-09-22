@@ -53,6 +53,15 @@ HOT_HINTS = {
 }
 LOW_VALUE_HINTS = {"opinion", "newsletter", "podcast", "quiz", "watch", "live blog", "minute-by-minute", "gallery"}
 
+_RUSSIA_HARD_BLOCK_RE = re.compile(
+    r"(?iu)\\b(russia|russian|россия|российск\\w*|росі(?:я|ї|єю|ю)|російськ\\w*|рф\\b|"
+    r"russian premier league|russia fnl|fnl 2|zenit|spartak(?: moscow)?|cska(?: moscow)?|"
+    r"lokomotiv(?: moscow)?|dynamo moscow|rubin kazan|krasnodar|rostov|akhmat|sochi)\\b"
+)
+
+def _blocked_geo_text(value: str) -> bool:
+    return bool(_RUSSIA_HARD_BLOCK_RE.search(value or ""))
+
 
 @dataclass
 class WebItem:
@@ -211,7 +220,12 @@ async def fetch_ranked_web_news(limit: int = 8) -> list[tuple[Cluster, float]]:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; AutoPostingSports/1.0)", "Accept": "application/rss+xml,application/xml,text/xml,text/html;q=0.8,*/*;q=0.5"}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
         groups = await asyncio.gather(*[_fetch_feed(client, *feed) for feed in FEEDS])
-    items = [item for group in groups for item in group if -0.5 <= (now - item.published).total_seconds() / 3600 <= max_age_h and _sport_relevance(item) > 0]
+    items = [
+        item for group in groups for item in group
+        if -0.5 <= (now - item.published).total_seconds() / 3600 <= max_age_h
+        and _sport_relevance(item) > 0
+        and not _blocked_geo_text(f"{item.title} {item.summary} {item.url}")
+    ]
     ranked = [(cluster, _cluster_score(cluster, now, max_age_h)) for cluster in _cluster_items(items)]
     ranked.sort(key=lambda pair: pair[1], reverse=True)
     return ranked[: max(1, int(limit))]
@@ -359,6 +373,10 @@ async def process_web_news_once(user_id: int | None = None) -> dict:
 
     ranked = await fetch_ranked_web_news(10)
     for cluster, web_score in ranked:
+        cluster_blob = " ".join(f"{item.title} {item.summary} {item.url}" for item in cluster.items)
+        if _blocked_geo_text(cluster_blob):
+            log.info("Web candidate hard-blocked by Europe/Americas geo policy title=%s", cluster.title[:120])
+            continue
         if web_score < threshold or await _near_duplicate(user_id, cluster.title):
             continue
         source = _source_key(cluster)
