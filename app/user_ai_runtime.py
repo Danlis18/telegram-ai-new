@@ -30,6 +30,15 @@ def _decrypt(value: str) -> str | None:
         return None
 
 
+def _quota_exhausted(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return (
+        "insufficient_quota" in text
+        or "credit_balance_exhausted" in text
+        or "no credits remaining" in text
+    )
+
+
 async def get_user_api_key(user_id: int | None = None) -> str | None:
     uid = int(user_id or get_current_user_id() or 0)
     if not uid:
@@ -44,10 +53,19 @@ async def set_user_api_key(user_id: int, api_key: str, *, validate: bool = True)
     if len(key) < 20 or not key.startswith("sk-"):
         raise ValueError("Схоже, це не OpenAI API key")
     if validate:
-        probe = AsyncOpenAI(api_key=key, timeout=20)
+        # models.list() validates syntax/access but does not prove the account has
+        # usable credits. Make one tiny Responses request so an exhausted key is
+        # rejected immediately instead of silently breaking the news pipeline later.
+        probe = AsyncOpenAI(api_key=key, timeout=20, max_retries=0)
         try:
-            await probe.models.list()
+            await probe.responses.create(
+                model=settings.openai_model,
+                input="Відповідай одним словом: OK",
+                max_output_tokens=4,
+            )
         except Exception as exc:
+            if _quota_exhausted(exc):
+                raise ValueError("API key правильний, але на OpenAI API немає доступних credits") from exc
             raise ValueError(f"OpenAI не прийняв цей API key: {type(exc).__name__}") from exc
     with user_scope(int(user_id)):
         await set_setting(_KEY_SETTING, _encrypt(key))
@@ -78,20 +96,38 @@ async def current_ai_client() -> AsyncOpenAI:
     return _client_for_key(key or settings.openai_api_key)
 
 
+async def _call_with_shared_fallback(resource: str, method: str, *args, **kwargs):
+    """Use the workspace key first, then the Railway key only for exhausted custom credits."""
+    user_key = await get_user_api_key()
+    primary_key = user_key or settings.openai_api_key
+    primary = _client_for_key(primary_key)
+    target = getattr(getattr(primary, resource), method)
+    try:
+        return await target(*args, **kwargs)
+    except Exception as exc:
+        shared = (settings.openai_api_key or "").strip()
+        if user_key and shared and shared != user_key and _quota_exhausted(exc):
+            log.warning(
+                "Workspace OpenAI credits exhausted user_id=%s; retrying with shared Railway key",
+                get_current_user_id() or 0,
+            )
+            fallback = _client_for_key(shared)
+            fallback_target = getattr(getattr(fallback, resource), method)
+            return await fallback_target(*args, **kwargs)
+        raise
+
+
 class _ResponsesProxy:
     async def create(self, *args, **kwargs):
-        client = await current_ai_client()
-        return await client.responses.create(*args, **kwargs)
+        return await _call_with_shared_fallback("responses", "create", *args, **kwargs)
 
 
 class _ImagesProxy:
     async def generate(self, *args, **kwargs):
-        client = await current_ai_client()
-        return await client.images.generate(*args, **kwargs)
+        return await _call_with_shared_fallback("images", "generate", *args, **kwargs)
 
     async def edit(self, *args, **kwargs):
-        client = await current_ai_client()
-        return await client.images.edit(*args, **kwargs)
+        return await _call_with_shared_fallback("images", "edit", *args, **kwargs)
 
 
 class ContextualOpenAI:
@@ -109,4 +145,4 @@ def install_user_ai_runtime() -> None:
     ai_editor.client = contextual_client
     content_policy.client = contextual_client
     admin_bot.image_debug_client = contextual_client
-    log.info("Installed per-user OpenAI client routing")
+    log.info("Installed per-user OpenAI client routing with shared-key fallback")
