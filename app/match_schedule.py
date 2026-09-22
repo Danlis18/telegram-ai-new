@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -54,6 +55,24 @@ TEAM_WEIGHT = {
     "bayer leverkusen": 13, "rb leipzig": 11, "marseille": 11, "monaco": 10,
     "athletic club": 10, "real betis": 10, "sevilla": 10, "villarreal": 10,
 }
+
+_RUSSIA_MATCH_RE = re.compile(
+    r"(?iu)\\b(russia|russian|россия|российск\\w*|росі(?:я|ї|єю|ю)|російськ\\w*|рф\\b|"
+    r"fnl(?: 2)?|zenit|spartak(?: moscow)?|cska(?: moscow)?|lokomotiv(?: moscow)?|"
+    r"dynamo moscow|rubin kazan|krasnodar|rostov|akhmat|sochi|sevastopol|yalta)\\b"
+)
+
+_FOCUS_COMPETITION_RE = re.compile(
+    r"(?iu)(champions league|europa league|conference league|premier league|la liga|serie a|"
+    r"bundesliga|ligue 1|fa cup|copa del rey|coppa italia|dfb.?pokal|major league soccer|\\bmls\\b|"
+    r"liga mx|concacaf|copa libertadores|copa sudamericana|brasileir|argentin|uefa|euro)"
+)
+
+def _fixture_allowed(league_name: str, home: str, away: str) -> bool:
+    blob = f"{league_name} {home} {away}"
+    if _RUSSIA_MATCH_RE.search(blob):
+        return False
+    return bool(_FOCUS_COMPETITION_RE.search(league_name or ""))
 
 TEAM_UK = {
     "Real Madrid": "Реал Мадрид", "Barcelona": "Барселона", "Manchester City": "Манчестер Сіті",
@@ -192,6 +211,9 @@ async def _fetch_thesportsdb_day(client: httpx.AsyncClient, local_now: datetime)
             away = str(event.get("strAwayTeam") or "").strip()
             if not home or not away:
                 continue
+            raw_league = str(event.get("strLeague") or "").strip()
+            if not _fixture_allowed(raw_league, home, away):
+                continue
 
             stamp = str(event.get("strTimestamp") or "").strip()
             kickoff = _parse_iso(stamp) if stamp else None
@@ -263,6 +285,8 @@ async def fetch_top_fixtures(limit: int = 5, now: datetime | None = None) -> lis
 
     by_id: dict[str, Fixture] = {}
     for fixture in fixtures:
+        if not _fixture_allowed(fixture.league_name, fixture.home, fixture.away):
+            continue
         kickoff_local = fixture.kickoff.astimezone(_tz())
         if kickoff_local.date() != local_now.date() or fixture.completed:
             continue
