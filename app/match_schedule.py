@@ -57,14 +57,14 @@ TEAM_WEIGHT = {
 }
 
 _RUSSIA_MATCH_RE = re.compile(
-    r"(?iu)\\b(russia|russian|россия|российск\\w*|росі(?:я|ї|єю|ю)|російськ\\w*|рф\\b|"
+    r"(?iu)\b(russia|russian|россия|российск\w*|росі(?:я|ї|єю|ю)|російськ\w*|рф\b|"
     r"fnl(?: 2)?|zenit|spartak(?: moscow)?|cska(?: moscow)?|lokomotiv(?: moscow)?|"
-    r"dynamo moscow|rubin kazan|krasnodar|rostov|akhmat|sochi|sevastopol|yalta)\\b"
+    r"dynamo moscow|rubin kazan|krasnodar|rostov|akhmat|sochi|sevastopol|yalta)\b"
 )
 
 _FOCUS_COMPETITION_RE = re.compile(
     r"(?iu)(champions league|europa league|conference league|premier league|la liga|serie a|"
-    r"bundesliga|ligue 1|fa cup|copa del rey|coppa italia|dfb.?pokal|major league soccer|\\bmls\\b|"
+    r"bundesliga|ligue 1|fa cup|copa del rey|coppa italia|dfb.?pokal|major league soccer|\bmls\b|"
     r"liga mx|concacaf|copa libertadores|copa sudamericana|brasileir|argentin|uefa|euro)"
 )
 
