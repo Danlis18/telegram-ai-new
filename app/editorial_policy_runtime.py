@@ -29,12 +29,14 @@ _POLICY_PROMPT = """
 - У готовому пості НЕ пиши «МСК», «за московським часом», «за Києвом», «за українським часом», UTC, GMT або назву будь-якого часового поясу. Просто пиши природно: «початок о 22:00».
 - Не залишай чужу годину без конвертації.
 
-РЕДАКЦІЙНИЙ ФІЛЬТР ЩОДО РОСІЇ — ЖОРСТКО:
-- Якщо новина головним чином просуває, хвалить, популяризує або нейтрально висвітлює Росію, російську збірну, клуб, спортсмена, функціонера чи іншу російську спортивну сторону — publish=false.
-- Не публікуй перемоги, рекорди, успіхи, трансфери, досягнення, позитивні цитати, анонси чи звичайне нейтральне висвітлення російських спортивних суб'єктів.
-- Дозволяй публікацію лише коли сам факт джерела має явно негативний/критичний для російської сторони контекст: поразка, провал, дискваліфікація, санкції, покарання, викриття порушення, скандал, агресія/неправомірна дія, інший очевидно негативний наслідок.
-- НІКОЛИ не перекручуй нейтральну або позитивну новину в негативну лише для проходження фільтра. Якщо джерело саме не дає негативного факту — publish=false.
-- Пиши фактологічно, без образ, мови ненависті чи приниження людей за національністю.
+РЕДАКЦІЙНИЙ ГЕОФІЛЬТР — АБСОЛЮТНИЙ:
+- Канал орієнтується на спорт Європи та Америки.
+- БУДЬ-ЯКИЙ матеріал про російські ліги, клуби, збірні, спортсменів, функціонерів або турніри в Росії — publish=false без винятків.
+- Не публікуй російський спорт навіть у негативному, критичному, санкційному чи скандальному контексті.
+- Якщо Росія/російський спортивний суб'єкт є суттєвою частиною новини — publish=false.
+- Не намагайся переписувати російську тему так, щоб вона пройшла фільтр.
+- Пріоритет контенту: топові ліги, клуби, збірні та турніри Європи, США, Канади, Мексики, Південної та Центральної Америки.
+- Пиши фактологічно, без образ чи мови ненависті.
 """
 
 
@@ -50,35 +52,10 @@ def _kyiv_context() -> str:
 
 
 async def _russia_context_allowed(source_text: str) -> tuple[bool, str]:
-    """Second-pass gate only for Russia-related stories; avoids accidental positive/neutral publication."""
-    if not _RUSSIA_RE.search(source_text or ""):
-        return True, "not Russia-related"
-
-    from app import ai_editor
-
-    prompt = """Ти виконуєш лише редакційний фільтр для українського спортивного каналу.
-Проаналізуй ТІЛЬКИ факти джерела.
-ALLOW=true тільки якщо головний російський суб'єкт у цій новині перебуває в явно негативному/критичному контексті: поразка, провал, санкція, дискваліфікація, покарання, викрите порушення, скандал, неправомірна дія/агресія або інший очевидно негативний для нього наслідок.
-ALLOW=false для позитивної або нейтральної новини: перемога, успіх, рекорд, трансфер, досягнення, позитивна цитата, анонс, звичайна участь/результат без негативного контексту.
-Не домислюй негатив. Не оцінюй людей за національністю.
-Поверни тільки JSON: {"allow":bool,"reason":"коротко"}."""
-    try:
-        response = await ai_editor.client.responses.create(
-            model=settings.openai_model,
-            input=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": source_text[:6000]},
-            ],
-        )
-        raw = response.output_text.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`").removeprefix("json").strip()
-        data = json.loads(raw)
-        return bool(data.get("allow")), str(data.get("reason") or "Russia editorial filter")
-    except Exception as exc:
-        # Fail closed for Russia-related content: better skip one item than publish prohibited context.
-        log.exception("Russia editorial classifier failed")
-        return False, f"Russia filter error: {type(exc).__name__}"
+    """Absolute hard gate: Russia-related sports content is never publishable."""
+    if _RUSSIA_RE.search(source_text or ""):
+        return False, "Russia-related sports content is disabled"
+    return True, "not Russia-related"
 
 
 def _strip_timezone_labels(text: str) -> str:
@@ -112,7 +89,7 @@ def install_editorial_policy() -> None:
         if result.get("text"):
             result["text"] = _strip_timezone_labels(str(result["text"]))
 
-        # Hard second pass: Russia-related positive/neutral stories never reach the ready queue.
+        # Absolute hard gate: Russia-related sports stories never reach the ready queue.
         if result.get("publish") and _RUSSIA_RE.search(text or ""):
             allowed, reason = await _russia_context_allowed(text)
             if not allowed:
