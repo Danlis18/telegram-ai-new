@@ -56,7 +56,8 @@ LOW_VALUE_HINTS = {"opinion", "newsletter", "podcast", "quiz", "watch", "live bl
 _RUSSIA_HARD_BLOCK_RE = re.compile(
     r"(?iu)\b(russia|russian|россия|российск\w*|росі(?:я|ї|єю|ю)|російськ\w*|рф\b|"
     r"russian premier league|russia fnl|fnl 2|zenit|spartak(?: moscow)?|cska(?: moscow)?|"
-    r"lokomotiv(?: moscow)?|dynamo moscow|rubin kazan|krasnodar|rostov|akhmat|sochi)\b"\n)
+    r"lokomotiv(?: moscow)?|dynamo moscow|rubin kazan|krasnodar|rostov|akhmat|sochi)\b"
+)
 
 def _blocked_geo_text(value: str) -> bool:
     return bool(_RUSSIA_HARD_BLOCK_RE.search(value or ""))
