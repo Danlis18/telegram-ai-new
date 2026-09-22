@@ -16,6 +16,17 @@ from app.premium_emoji_registry import resolve_emoji
 log = logging.getLogger("telegram-ai-news.match-schedule")
 
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
+THESPORTSDB_DAY = "https://www.thesportsdb.com/api/v1/json/123/eventsday.php"
+
+# TheSportsDB is the primary schedule source because ESPN currently returns 403
+# from Railway datacenter IPs. The public v1 key 123 is documented by TheSportsDB.
+TSD_LEAGUES = [
+    ("4328", "eng.1", "Прем'єр-ліга", "🏴", 36),
+    ("4335", "esp.1", "Ла Ліга", "🇪🇸", 33),
+    ("4332", "ita.1", "Серія A", "🇮🇹", 30),
+    ("4331", "ger.1", "Бундесліга", "🇩🇪", 30),
+    ("4334", "fra.1", "Ліга 1", "🇫🇷", 26),
+]
 
 LEAGUES = [
     ("uefa.champions", "Ліга чемпіонів", "🏆", 42),
@@ -146,6 +157,94 @@ async def _fetch_league(client: httpx.AsyncClient, code: str, name: str, emoji: 
     return fixtures
 
 
+async def _fetch_thesportsdb_day(client: httpx.AsyncClient, local_now: datetime) -> list[Fixture]:
+    date_value = local_now.date().isoformat()
+    requests = [
+        client.get(THESPORTSDB_DAY, params={"d": date_value, "s": "Soccer"}, timeout=16)
+    ]
+    requests.extend(
+        client.get(THESPORTSDB_DAY, params={"d": date_value, "l": league_id}, timeout=16)
+        for league_id, *_ in TSD_LEAGUES
+    )
+    responses = await asyncio.gather(*requests, return_exceptions=True)
+
+    league_by_id = {
+        league_id: (code, name, emoji, weight)
+        for league_id, code, name, emoji, weight in TSD_LEAGUES
+    }
+    by_event: dict[str, Fixture] = {}
+
+    for response in responses:
+        if isinstance(response, Exception):
+            log.warning("TheSportsDB fixture request failed: %s", response)
+            continue
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            log.warning("TheSportsDB fixture response failed: %s", exc)
+            continue
+
+        for event in payload.get("events") or []:
+            if str(event.get("strSport") or "").casefold() not in {"soccer", "football"}:
+                continue
+            home = str(event.get("strHomeTeam") or "").strip()
+            away = str(event.get("strAwayTeam") or "").strip()
+            if not home or not away:
+                continue
+
+            stamp = str(event.get("strTimestamp") or "").strip()
+            kickoff = _parse_iso(stamp) if stamp else None
+            if kickoff is None:
+                date_part = str(event.get("dateEvent") or date_value).strip()
+                time_part = str(event.get("strTime") or "00:00:00").strip()
+                try:
+                    naive = datetime.fromisoformat(f"{date_part}T{time_part}")
+                    kickoff = naive.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+
+            league_id = str(event.get("idLeague") or "")
+            code, name, emoji, weight = league_by_id.get(
+                league_id,
+                (
+                    "web.fixture",
+                    str(event.get("strLeague") or "Футбол").strip() or "Футбол",
+                    "⚽",
+                    18,
+                ),
+            )
+            status = str(event.get("strStatus") or "").casefold()
+            completed = status in {"match finished", "finished", "ft", "aet", "pen"}
+            event_id = str(event.get("idEvent") or f"tsdb:{league_id}:{home}:{away}:{kickoff.isoformat()}")
+            candidate = Fixture(
+                event_id=event_id,
+                league_code=code,
+                league_name=name,
+                league_emoji=emoji,
+                league_weight=weight,
+                kickoff=kickoff,
+                home=home,
+                away=away,
+                completed=completed,
+            )
+            previous = by_event.get(event_id)
+            if previous is None or candidate.score > previous.score:
+                by_event[event_id] = candidate
+
+    values = list(by_event.values())
+    log.info("TheSportsDB fixture source returned %d unique events for %s", len(values), date_value)
+    return values
+
+
+async def _fetch_espn_fixtures(client: httpx.AsyncClient, date_key: str) -> list[Fixture]:
+    groups = await asyncio.gather(*[
+        _fetch_league(client, code, name, emoji, weight, date_key)
+        for code, name, emoji, weight in LEAGUES
+    ])
+    return [fixture for group in groups for fixture in group]
+
+
 async def fetch_top_fixtures(limit: int = 5, now: datetime | None = None) -> list[Fixture]:
     local_now = now.astimezone(_tz()) if now else datetime.now(_tz())
     date_key = local_now.strftime("%Y%m%d")
@@ -153,23 +252,25 @@ async def fetch_top_fixtures(limit: int = 5, now: datetime | None = None) -> lis
         "User-Agent": "Mozilla/5.0 (compatible; AutoPostingSports/1.0)",
         "Accept": "application/json,text/plain,*/*",
     }
+
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
-        groups = await asyncio.gather(*[
-            _fetch_league(client, code, name, emoji, weight, date_key)
-            for code, name, emoji, weight in LEAGUES
-        ])
+        fixtures = await _fetch_thesportsdb_day(client, local_now)
+        # ESPN remains a fallback only. This avoids hammering an endpoint that
+        # currently rejects Railway with HTTP 403 while keeping redundancy.
+        if not fixtures:
+            log.warning("TheSportsDB returned no fixtures; trying ESPN fallback")
+            fixtures = await _fetch_espn_fixtures(client, date_key)
 
     by_id: dict[str, Fixture] = {}
-    for group in groups:
-        for fixture in group:
-            kickoff_local = fixture.kickoff.astimezone(_tz())
-            if kickoff_local.date() != local_now.date() or fixture.completed:
-                continue
-            if kickoff_local < local_now - timedelta(minutes=35):
-                continue
-            previous = by_id.get(fixture.event_id)
-            if previous is None or fixture.score > previous.score:
-                by_id[fixture.event_id] = fixture
+    for fixture in fixtures:
+        kickoff_local = fixture.kickoff.astimezone(_tz())
+        if kickoff_local.date() != local_now.date() or fixture.completed:
+            continue
+        if kickoff_local < local_now - timedelta(minutes=35):
+            continue
+        previous = by_id.get(fixture.event_id)
+        if previous is None or fixture.score > previous.score:
+            by_id[fixture.event_id] = fixture
 
     ranked = sorted(by_id.values(), key=lambda f: (-f.score, f.kickoff))
     strong = [item for item in ranked if item.score >= 34]
