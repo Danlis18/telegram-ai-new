@@ -807,23 +807,6 @@
   install();
 })();
 
-(() => {
-  if (!document.querySelector('link[data-external-ai-style]')) {
-    const link = document.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = './external-control.css?v=1';
-    link.dataset.externalAiStyle = '1';
-    document.head.appendChild(link);
-  }
-  if (!document.querySelector('script[data-external-ai-script]')) {
-    const script = document.createElement('script');
-    script.src = './external-control.js?v=1';
-    script.defer = true;
-    script.dataset.externalAiScript = '1';
-    document.head.appendChild(script);
-  }
-})();
-
 /* ==================== WORKSPACE ==================== */
 (() => {
   'use strict';
