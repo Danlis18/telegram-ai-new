@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 from openai import AsyncOpenAI
-from PIL import Image, ImageFile, UnidentifiedImageError
+from PIL import Image, ImageFile, ImageFilter, ImageStat, UnidentifiedImageError
 
 from app.config import settings
 from app.database import (
@@ -256,18 +256,70 @@ async def _resolve_logo_bytes() -> bytes:
     return LOGO_PATH.read_bytes()
 
 
+def _corner_activity(image: Image.Image, box: tuple[int, int, int, int]) -> float:
+    """Estimate visual busyness so branding avoids faces/players/text when possible."""
+    crop = image.convert("L").crop(box)
+    if crop.width < 2 or crop.height < 2:
+        return 9999.0
+    crop = crop.resize((96, 96), Image.Resampling.BILINEAR)
+    edges = crop.filter(ImageFilter.FIND_EDGES)
+    edge_mean = float(ImageStat.Stat(edges).mean[0])
+    contrast = float(ImageStat.Stat(crop).stddev[0])
+    return edge_mean * 1.8 + contrast
+
+
+def _choose_logo_position(image: Image.Image, logo_w: int, logo_h: int, margin_x: int, margin_y: int) -> tuple[int, int]:
+    width, height = image.size
+    candidates = [
+        ("tl", margin_x, margin_y, 0.0),
+        ("tr", width - margin_x - logo_w, margin_y, 8.0),
+        ("bl", margin_x, height - margin_y - logo_h, 12.0),
+        ("br", width - margin_x - logo_w, height - margin_y - logo_h, 16.0),
+    ]
+    best = None
+    for name, x, y, preference_penalty in candidates:
+        x = max(0, min(width - logo_w, x))
+        y = max(0, min(height - logo_h, y))
+        pad_x = max(8, int(logo_w * 0.18))
+        pad_y = max(8, int(logo_h * 0.18))
+        box = (
+            max(0, x - pad_x),
+            max(0, y - pad_y),
+            min(width, x + logo_w + pad_x),
+            min(height, y + logo_h + pad_y),
+        )
+        score = _corner_activity(image, box) + preference_penalty
+        if best is None or score < best[0]:
+            best = (score, x, y, name)
+    _, x, y, name = best
+    log.info("SPORTS NEWS logo position=%s x=%d y=%d", name, x, y)
+    return x, y
+
+
 def _add_sports_news_logo(image_bytes: bytes, logo_bytes: bytes) -> bytes:
     image = _open_image_bytes(image_bytes, "WORKING_IMAGE").convert("RGBA")
     logo = _open_image_bytes(logo_bytes, "SPORTS_NEWS_LOGO").convert("RGBA")
     width, height = image.size
     base = min(width, height)
-    target_w = max(88, int(base * 0.145))
-    scale = target_w / logo.width
+
+    # Keep branding compact. Large logos were covering athletes and competing with
+    # the generated composition on mobile previews.
+    target_w = max(72, int(base * 0.105))
+    scale = target_w / max(1, logo.width)
     target_h = max(1, int(logo.height * scale))
     logo = logo.resize((target_w, target_h), Image.Resampling.LANCZOS)
-    margin_x = max(14, int(width * 0.022))
-    margin_y = max(14, int(height * 0.022))
-    image.alpha_composite(logo, (margin_x, margin_y))
+
+    margin_x = max(18, int(width * 0.025))
+    margin_y = max(18, int(height * 0.025))
+    x, y = _choose_logo_position(image, target_w, target_h, margin_x, margin_y)
+
+    # A very subtle shadow gives separation without creating another graphic card.
+    alpha = logo.getchannel("A")
+    shadow = Image.new("RGBA", logo.size, (0, 0, 0, 0))
+    shadow.putalpha(alpha.filter(ImageFilter.GaussianBlur(max(1, int(base * 0.004)))))
+    image.alpha_composite(shadow, (min(width - target_w, x + 3), min(height - target_h, y + 4)))
+    image.alpha_composite(logo, (x, y))
+
     out = BytesIO()
     image.convert("RGB").save(out, format="JPEG", quality=96, optimize=True)
     return out.getvalue()
@@ -339,8 +391,10 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
                     "Do not redesign, restyle, recolor, relight, beautify, sharpen, change anatomy or invent a different person. "
                     "Keep natural physical details that are genuinely part of the photographed scene, including club crests and jersey details printed on clothing, tattoos and real stadium elements. "
                     "Do not add any new text or branding. The final result must look like the clean original photograph before any poster text or graphic overlay was added. "
-                    f"News context is for identification only and must NOT be rendered as text: {clean_context}."
+                    f"News context is for identification only and must NOT be rendered as text: {clean_context}. "
                     + owner_rules
+                    + " FINAL NON-NEGOTIABLE RULES: output a clean photograph only. Do not render a headline, caption, quote, score, letters, words, numbers, labels, fake typography, SN SPORTS, SPORTS NEWS, badges, watermarks or any newly invented logo. "
+                      "Do not place graphic panels over the athlete. Keep important faces, heads and hands inside the frame and unobstructed."
                 ),
             )
         except Exception as exc:
@@ -370,12 +424,20 @@ async def generate_news_image(news_text: str, *, source_image: bytes | None = No
         result = await client.images.generate(
             model=image_model,
             prompt=(
-                "Create a clean photorealistic sports editorial photograph. "
-                "No foreign media/channel/bookmaker/casino branding. No artificial text. "
-                "Natural saturated colors, realistic skin, anatomy, clothing, lighting and shadows. "
+                "Create a premium PHOTOREALISTIC sports editorial IMAGE, not a poster and not a text card. "
+                "The image itself must communicate the news visually through the athlete, coach, arena, stadium, equipment and atmosphere. "
+                "Use natural saturated colors, realistic skin, anatomy, clothing, lighting, shadows and photographic texture. "
+                "Keep the main subject comfortably inside the canvas: do not awkwardly cut off the head, face, hands or other important body parts. "
                 f"Composition reference: {selected_key}. {template['prompt']} "
-                f"News context: {clean_context}."
+                f"News context for scene selection only: {clean_context}. "
                 + owner_rules
+                + " FINAL NON-NEGOTIABLE ART-DIRECTION: ABSOLUTELY NO GENERATED TEXT. "
+                  "Do not render any headline, subheadline, paragraph, quote, player name, team name, score, date, letters, words, numbers, pseudo-letters or decorative typography anywhere in the image. "
+                  "Do not render SN SPORTS, SPORTS NEWS, media logos, bookmaker/casino logos, watermarks, sponsor blocks or fake club badges. "
+                  "The official SN SPORTS logo is added later by code, so leave the upper-left area visually calm when possible and never put a face, head or key action there. "
+                  "Do not create a black text column, news-card panel, banner, lower-third or typography box. "
+                  "Use the full canvas as one harmonious photographic composition with clean negative space and no overlapping graphic elements. "
+                  "If any earlier instruction suggests a headline zone or branding, interpret it ONLY as empty compositional space; DO NOT draw text or a logo."
             ),
             size="1536x1024",
         )
