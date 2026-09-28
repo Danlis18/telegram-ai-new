@@ -9,6 +9,7 @@ from pathlib import Path
 
 from telethon.tl import types
 from telethon.utils import get_peer_id
+from telegram import InputMediaPhoto, InputMediaVideo
 
 from app.config import settings
 from app.formatting import post_html
@@ -229,6 +230,65 @@ async def _download_bot_media(bot, file_id: str, media_type: str, index: int) ->
     return buf
 
 
+def _is_write_forbidden(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    text = str(exc).casefold()
+    return (
+        name in {"ChatWriteForbiddenError", "UserBannedInChannelError", "ChannelPrivateError"}
+        or "can't write in this chat" in text
+        or "cannot write in this chat" in text
+        or "write forbidden" in text
+    )
+
+
+async def _send_with_bot(bot, destination, row: dict) -> None:
+    """Permission-safe fallback when the Premium account cannot post to the target."""
+    from app import album_support
+
+    text = post_html(row.get("rewritten_text") or "")
+    items = await album_support.get_news_media(int(row["id"]))
+    if items:
+        media = []
+        for index, item in enumerate(items):
+            file_id = item.get("edited_file_id") or item["original_file_id"]
+            caption = text if index == 0 else None
+            if item["media_type"] == "video":
+                media.append(
+                    InputMediaVideo(
+                        media=file_id,
+                        caption=caption,
+                        parse_mode="HTML" if caption else None,
+                        supports_streaming=True,
+                    )
+                )
+            else:
+                media.append(
+                    InputMediaPhoto(
+                        media=file_id,
+                        caption=caption,
+                        parse_mode="HTML" if caption else None,
+                    )
+                )
+        await bot.send_media_group(chat_id=destination, media=media)
+        return
+
+    media_type = row.get("media_type")
+    file_id = row.get("media_file_id")
+    if media_type == "photo" and file_id:
+        await bot.send_photo(chat_id=destination, photo=file_id, caption=text, parse_mode="HTML")
+        return
+    if media_type == "video" and file_id:
+        await bot.send_video(
+            chat_id=destination,
+            video=file_id,
+            caption=text,
+            parse_mode="HTML",
+            supports_streaming=True,
+        )
+        return
+    await bot.send_message(chat_id=destination, text=text, parse_mode="HTML", disable_web_page_preview=True)
+
+
 async def _send_with_user(client, bot, destination, row: dict) -> None:
     from app import album_support
 
@@ -285,7 +345,7 @@ async def _send_with_user(client, bot, destination, row: dict) -> None:
 
 
 async def publish_row_via_user(bot, row: dict) -> None:
-    """Use a Premium Telegram user account when configured; otherwise preserve Bot API publishing."""
+    """Use Premium user publishing first, but never lose a post only because that account lacks channel rights."""
     client = await _ready_client()
     if client is None:
         return await _fallback_publish_row(bot, row)
@@ -296,7 +356,43 @@ async def publish_row_via_user(bot, row: dict) -> None:
     target = await get_target_for_source(user_id, row.get("source"))
     if not target:
         raise RuntimeError("TARGET_CHANNEL_NOT_CONFIGURED: add a publishing channel in 'Мої канали'")
-    await _send_with_user(client, bot, target["channel_ref"], row)
+    destination = target["channel_ref"]
+
+    try:
+        await _send_with_user(client, bot, destination, row)
+        return
+    except Exception as exc:
+        if not _is_write_forbidden(exc):
+            raise
+
+        # Typical case: the Premium session is online but that user account is no
+        # longer an admin of one publication channel. The bot itself is normally
+        # still an admin, so publish through Bot API instead of failing the post.
+        log.warning(
+            "Premium publisher has no write permission destination=%s post_id=%s; trying Bot API fallback: %s",
+            destination,
+            row.get("id"),
+            _safe_error(exc),
+        )
+        _status["error"] = (
+            f"Premium account cannot write to {destination}; Bot API fallback is active"
+        )
+        try:
+            await _send_with_bot(bot, destination, row)
+            log.info(
+                "Bot API fallback published post_id=%s destination=%s successfully",
+                row.get("id"),
+                destination,
+            )
+            return
+        except Exception as bot_exc:
+            raise RuntimeError(
+                "PUBLISH_PERMISSION_DENIED: Premium account cannot write to "
+                f"{destination}, and the bot fallback also failed. "
+                "Add @"
+                f"{_status.get('username') or 'publisher'} and the bot as channel admins with Post Messages permission. "
+                f"Premium error={_safe_error(exc)}; bot error={_safe_error(bot_exc)}"
+            ) from bot_exc
 
 
 def _status_html() -> str:
