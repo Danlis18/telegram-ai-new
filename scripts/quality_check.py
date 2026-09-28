@@ -35,6 +35,14 @@ def check_frontend_assets() -> list[str]:
     stale = sorted(actual - expected)
     if stale:
         errors.append("Unexpected Mini App production fragments: " + ", ".join(stale))
+
+    app_js = (MINIAPP / "app.js").read_text(encoding="utf-8")
+    dynamic_fragments = re.findall(r"['\"]\.\/[^'\"]+\.(?:css|js)(?:\?[^'\"]*)?['\"]", app_js)
+    if dynamic_fragments:
+        errors.append(
+            "Bundled Mini App must not dynamically load deleted JS/CSS fragments: "
+            + ", ".join(sorted(set(dynamic_fragments)))
+        )
     return errors
 
 
