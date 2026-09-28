@@ -1,3 +1,4 @@
+/* ==================== CORE ==================== */
 (() => {
   'use strict';
   const tg = window.Telegram?.WebApp;
@@ -348,4 +349,827 @@
     catch (e) { $('#loader').innerHTML=`<div class="loader-logo"></div><strong style="font-size:14px">Mini App недоступний</strong><span style="max-width:280px;text-align:center;line-height:1.5">${esc(e.message)}</span>`; return; }
   }
   init();
+})();
+
+/* ==================== PREMIUM UI ==================== */
+(() => {
+  'use strict';
+  const tg = window.Telegram?.WebApp;
+  const initData = tg?.initData || '';
+  const $ = (s, root = document) => root.querySelector(s);
+  const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+  const esc = (v = '') => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let refreshing = false;
+  let lastLiveIds = '';
+
+  const haptic = (kind = 'light') => { try { tg?.HapticFeedback?.impactOccurred(kind); } catch (_) {} };
+  const notify = (kind = 'success') => { try { tg?.HapticFeedback?.notificationOccurred(kind); } catch (_) {} };
+
+  async function api(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    headers.set('X-Telegram-Init-Data', initData);
+    if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+    const res = await fetch(path, {...options, headers});
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    return data;
+  }
+
+  function flash(message, error = false) {
+    const el = $('#toast');
+    if (!el) return;
+    el.textContent = message;
+    el.classList.toggle('error', error);
+    el.classList.remove('hidden');
+    clearTimeout(flash.timer);
+    flash.timer = setTimeout(() => el.classList.add('hidden'), 2400);
+  }
+
+  async function confirmPublish() {
+    if (tg?.showConfirm) return await new Promise(resolve => tg.showConfirm('Опублікувати цей пост зараз?', resolve));
+    return window.confirm('Опублікувати цей пост зараз?');
+  }
+
+  function mediaHTML(p) {
+    const m = p.media?.[0];
+    if (!m) return '<div class="live-thumb placeholder"></div>';
+    const media = m.type === 'video'
+      ? `<video src="${esc(m.url)}" muted playsinline preload="metadata"></video>`
+      : `<img src="${esc(m.url)}" loading="lazy" alt="">`;
+    const multi = (p.media?.length || 0) > 1 ? `<span class="live-multi">${p.media.length}</span>` : '';
+    return `<div class="live-thumb">${media}${multi}</div>`;
+  }
+
+  function liveCard(p) {
+    const premium = p.premium_emoji_count ? ` · ✦ ${p.premium_emoji_count}` : '';
+    const target = p.target?.title || p.target?.channel_ref || 'Канал не вибрано';
+    return `<article class="live-card" data-live-id="${p.id}">
+      ${mediaHTML(p)}
+      <div class="live-content">
+        <div class="live-meta"><span class="live-source">@${esc(p.source)}</span><span class="live-score">AI ${Number(p.score || 0)}%${premium}</span></div>
+        <div class="live-text">${esc(p.text_plain || 'Готовий пост')}</div>
+        <div class="live-route">→ ${esc(target)}</div>
+        <div class="live-actions"><button class="live-publish" data-live-publish="${p.id}">Опублікувати</button><button class="live-detail" data-live-detail="${p.id}" aria-label="Деталі">•••</button></div>
+      </div>
+    </article>`;
+  }
+
+  function updateQueueNumbers(delta = null) {
+    const metric = $('#mReady');
+    const badge = $('#queueBadge');
+    if (!metric || !badge || delta === null) return;
+    const next = Math.max(0, Number(metric.textContent || 0) + delta);
+    metric.textContent = String(next);
+    badge.textContent = next > 99 ? '99+' : String(next);
+    badge.classList.toggle('hidden', !next);
+  }
+
+  function bindLiveCards() {
+    $$('[data-live-publish]').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const id = Number(btn.dataset.livePublish);
+      if (!id || btn.classList.contains('loading')) return;
+      if (!(await confirmPublish())) return;
+      btn.classList.add('loading');
+      btn.textContent = 'Публікую…';
+      haptic('medium');
+      try {
+        await api(`/api/posts/${id}/publish`, {method:'POST'});
+        notify('success');
+        flash('Опубліковано ✓');
+        const card = btn.closest('.live-card');
+        card?.classList.add('removing');
+        updateQueueNumbers(-1);
+        setTimeout(loadLiveQueue, 360);
+      } catch (err) {
+        notify('error');
+        flash(err.message, true);
+        btn.classList.remove('loading');
+        btn.textContent = 'Опублікувати';
+      }
+    }));
+    $$('[data-live-detail]').forEach(btn => btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openInQueue(Number(btn.dataset.liveDetail));
+    }));
+    $$('.live-card').forEach(card => card.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      openInQueue(Number(card.dataset.liveId));
+    }));
+  }
+
+  async function loadLiveQueue(force = false) {
+    const root = $('#liveQueue');
+    if (!root || !initData || refreshing) return;
+    refreshing = true;
+    const refreshBtn = $('#liveQueueRefresh');
+    if (refreshBtn) refreshBtn.style.transform = 'rotate(25deg)';
+    try {
+      const data = await api('/api/posts?tab=ready&limit=8');
+      const items = data.items || [];
+      const ids = items.map(x => x.id).join(',');
+      const metricTotal = Math.max(items.length, Number($('#mReady')?.textContent || 0));
+      const label = $('#liveQueueCount');
+      if (label) label.textContent = metricTotal ? `${metricTotal} готов${metricTotal === 1 ? 'ий' : 'і'} · live` : 'Черга чиста · live';
+      if (!items.length) {
+        root.innerHTML = '<div class="live-empty"><strong>Черга чиста</strong><span>Нові готові новини з’являться тут автоматично. Нічого зайвого.</span></div>';
+      } else if (force || ids !== lastLiveIds || !root.querySelector('.live-card')) {
+        root.innerHTML = items.slice(0, 4).map(liveCard).join('');
+        bindLiveCards();
+      }
+      lastLiveIds = ids;
+    } catch (err) {
+      root.innerHTML = `<div class="live-empty"><strong>Не вдалося синхронізувати</strong><span>${esc(err.message)}</span></div>`;
+    } finally {
+      refreshing = false;
+      if (refreshBtn) refreshBtn.style.transform = '';
+    }
+  }
+
+  function openInQueue(id) {
+    haptic('light');
+    const nav = $('[data-nav="posts"]');
+    nav?.click();
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      const card = $(`.post-card[data-post-id="${id}"]`);
+      if (card) { clearInterval(timer); card.click(); }
+      else if (tries > 18) clearInterval(timer);
+    }, 100);
+  }
+
+  function enhanceQueueCards() {
+    const list = $('#postsList');
+    if (!list) return;
+    const ready = $('#postTabs [data-post-tab="ready"]')?.classList.contains('active');
+    $$('.post-card', list).forEach(card => {
+      const existing = $('.queue-inline-publish', card);
+      if (!ready) { existing?.remove(); card.classList.remove('has-inline-publish'); return; }
+      if (existing) return;
+      const id = Number(card.dataset.postId);
+      if (!id) return;
+      const btn = document.createElement('button');
+      btn.className = 'queue-inline-publish';
+      btn.type = 'button';
+      btn.textContent = '✓ Опублікувати';
+      btn.addEventListener('click', async e => {
+        e.preventDefault(); e.stopPropagation();
+        if (btn.classList.contains('loading')) return;
+        if (!(await confirmPublish())) return;
+        btn.classList.add('loading'); btn.textContent = 'Публікую…'; haptic('medium');
+        try {
+          await api(`/api/posts/${id}/publish`, {method:'POST'});
+          notify('success'); flash('Опубліковано ✓'); updateQueueNumbers(-1);
+          card.classList.add('removing');
+          setTimeout(() => { card.remove(); loadLiveQueue(true); }, 280);
+        } catch (err) {
+          notify('error'); flash(err.message, true); btn.classList.remove('loading'); btn.textContent = '✓ Опублікувати';
+        }
+      });
+      card.append(btn);
+      card.classList.add('has-inline-publish');
+    });
+  }
+
+  function installObservers() {
+    const list = $('#postsList');
+    if (list) new MutationObserver(() => requestAnimationFrame(enhanceQueueCards)).observe(list, {childList:true, subtree:true});
+    const tabs = $('#postTabs');
+    if (tabs) tabs.addEventListener('click', () => setTimeout(enhanceQueueCards, 120));
+
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver(entries => entries.forEach(entry => {
+        if (entry.isIntersecting) { entry.target.classList.add('lux-reveal'); io.unobserve(entry.target); }
+      }), {threshold:.08});
+      $$('.panel').forEach(el => io.observe(el));
+    }
+
+    const toast = $('#toast');
+    if (toast) new MutationObserver(() => {
+      if ((toast.textContent || '').includes('Опубліковано')) setTimeout(() => loadLiveQueue(true), 300);
+    }).observe(toast, {childList:true, characterData:true, subtree:true});
+  }
+
+  function bind() {
+    $('#liveQueueRefresh')?.addEventListener('click', () => { haptic('light'); loadLiveQueue(true); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadLiveQueue(true); });
+    window.addEventListener('focus', () => loadLiveQueue(false));
+  }
+
+  async function start() {
+    if (!initData) return;
+    bind();
+    installObservers();
+    await new Promise(resolve => setTimeout(resolve, 260));
+    loadLiveQueue(true);
+    enhanceQueueCards();
+    setInterval(() => {
+      if (!document.hidden && $('#screen-home')?.classList.contains('active')) loadLiveQueue(false);
+    }, 20000);
+  }
+
+  start();
+})();
+
+/* ==================== MEDIA CAROUSEL ==================== */
+(() => {
+  'use strict';
+
+  const tg = window.Telegram?.WebApp;
+  const initData = tg?.initData || '';
+  const AUTOPLAY_MS = 5000;
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+  const esc = (value = '') => String(value).replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[char]));
+
+  let pendingPostId = null;
+  let controller = null;
+  let renderToken = 0;
+
+  const haptic = (kind = 'light') => {
+    try { tg?.HapticFeedback?.impactOccurred(kind); } catch (_) {}
+  };
+
+  async function api(path) {
+    const response = await fetch(path, {
+      headers: {'X-Telegram-Init-Data': initData},
+      cache: 'no-store',
+    });
+    let data = null;
+    try { data = await response.json(); } catch (_) {}
+    if (!response.ok) throw new Error(data?.detail || `HTTP ${response.status}`);
+    return data;
+  }
+
+  function rememberPostFromEvent(event) {
+    const postCard = event.target.closest?.('.post-card[data-post-id]');
+    if (postCard) {
+      pendingPostId = Number(postCard.dataset.postId) || null;
+      return;
+    }
+    const live = event.target.closest?.('[data-live-id], [data-live-detail]');
+    if (live) {
+      pendingPostId = Number(live.dataset.liveId || live.dataset.liveDetail) || null;
+    }
+  }
+
+  function mediaNode(item, index) {
+    const type = String(item.type || 'photo').toLowerCase();
+    const url = esc(item.url || '');
+    if (type === 'video') {
+      return `<div class="lux-carousel-slide" data-slide="${index}" aria-hidden="${index ? 'true' : 'false'}">
+        <video src="${url}" muted playsinline preload="metadata" controls></video>
+      </div>`;
+    }
+    return `<div class="lux-carousel-slide" data-slide="${index}" aria-hidden="${index ? 'true' : 'false'}">
+      <img src="${url}" alt="Медіа ${index + 1}" draggable="false" decoding="async">
+    </div>`;
+  }
+
+  function destroyCarousel() {
+    if (controller) {
+      controller.destroy();
+      controller = null;
+    }
+  }
+
+  function createCarousel(host, post) {
+    destroyCarousel();
+
+    const items = Array.isArray(post.media) ? post.media.filter(item => item?.url) : [];
+    if (!items.length) return;
+
+    const multi = items.length > 1;
+    host.className = 'sheet-media lux-media-carousel';
+    host.dataset.carouselReady = '1';
+    host.innerHTML = `
+      <div class="lux-carousel-stage">
+        ${items.map(mediaNode).join('')}
+        <div class="lux-carousel-shade" aria-hidden="true"></div>
+        ${multi ? `<div class="lux-carousel-counter"><span data-current>1</span><i>/</i><span>${items.length}</span></div>` : ''}
+        ${multi ? `<div class="lux-carousel-progress" aria-label="Автоперегортання кожні 5 секунд"><span class="lux-progress-track"><i data-progress-fill></i></span><small>5s</small></div>` : ''}
+        ${multi ? '<div class="lux-swipe-hint" aria-hidden="true">‹ swipe ›</div>' : ''}
+      </div>`;
+
+    const slides = $$('.lux-carousel-slide', host);
+    const currentEl = $('[data-current]', host);
+    const fill = $('[data-progress-fill]', host);
+    let index = 0;
+    let timer = null;
+    let destroyed = false;
+    let touchStartX = null;
+    let touchStartY = null;
+
+    const stopTimer = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    };
+
+    const restartProgress = () => {
+      if (!fill || !multi) return;
+      fill.style.animation = 'none';
+      void fill.offsetHeight;
+      fill.style.animation = `luxMediaClock ${AUTOPLAY_MS}ms linear forwards`;
+    };
+
+    const schedule = () => {
+      stopTimer();
+      if (!multi || destroyed || document.hidden || $('#postSheet')?.classList.contains('hidden')) return;
+      restartProgress();
+      timer = setTimeout(() => show(index + 1, false), AUTOPLAY_MS);
+    };
+
+    const show = (nextIndex, manual = true) => {
+      if (destroyed || !slides.length) return;
+      index = (nextIndex + slides.length) % slides.length;
+      slides.forEach((slide, slideIndex) => {
+        const active = slideIndex === index;
+        slide.classList.toggle('active', active);
+        slide.setAttribute('aria-hidden', active ? 'false' : 'true');
+        const video = $('video', slide);
+        if (video && !active) {
+          try { video.pause(); } catch (_) {}
+        }
+      });
+      if (currentEl) currentEl.textContent = String(index + 1);
+      if (manual) haptic('light');
+      schedule();
+    };
+
+    const onTouchStart = event => {
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
+    };
+
+    const onTouchEnd = event => {
+      if (touchStartX === null || touchStartY === null) return;
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const dx = touch.clientX - touchStartX;
+      const dy = touch.clientY - touchStartY;
+      touchStartX = null;
+      touchStartY = null;
+      if (Math.abs(dx) < 42 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+      show(index + (dx < 0 ? 1 : -1), true);
+    };
+
+    const stage = $('.lux-carousel-stage', host);
+    stage?.addEventListener('touchstart', onTouchStart, {passive: true});
+    stage?.addEventListener('touchend', onTouchEnd, {passive: true});
+
+    const onWheel = event => {
+      if (!multi || Math.abs(event.deltaX) < 16 || Math.abs(event.deltaX) < Math.abs(event.deltaY)) return;
+      event.preventDefault();
+      show(index + (event.deltaX > 0 ? 1 : -1), true);
+    };
+    stage?.addEventListener('wheel', onWheel, {passive: false});
+
+    const onVisibility = () => {
+      if (document.hidden) stopTimer();
+      else schedule();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    const firstImage = $('img', slides[0]);
+    if (firstImage) {
+      const markReady = () => host.classList.add('media-ready');
+      if (firstImage.complete) markReady();
+      else firstImage.addEventListener('load', markReady, {once: true});
+    } else {
+      host.classList.add('media-ready');
+    }
+
+    slides[0]?.classList.add('active');
+    schedule();
+
+    controller = {
+      destroy() {
+        destroyed = true;
+        stopTimer();
+        document.removeEventListener('visibilitychange', onVisibility);
+        stage?.removeEventListener('touchstart', onTouchStart);
+        stage?.removeEventListener('touchend', onTouchEnd);
+        stage?.removeEventListener('wheel', onWheel);
+      }
+    };
+  }
+
+  async function upgradeSheet() {
+    const sheet = $('#postSheet');
+    const host = $('#postSheetContent .sheet-media');
+    if (!sheet || sheet.classList.contains('hidden') || !host || host.dataset.carouselReady === '1') return;
+    if (!pendingPostId || !initData) {
+      host.classList.add('lux-media-safe');
+      return;
+    }
+
+    const token = ++renderToken;
+    try {
+      const post = await api(`/api/posts/${pendingPostId}`);
+      if (token !== renderToken || sheet.classList.contains('hidden')) return;
+      createCarousel(host, post);
+    } catch (_) {
+      host.classList.add('lux-media-safe');
+    }
+  }
+
+  function install() {
+    document.addEventListener('click', rememberPostFromEvent, true);
+
+    const sheetContent = $('#postSheetContent');
+    if (sheetContent) {
+      new MutationObserver(() => requestAnimationFrame(upgradeSheet)).observe(sheetContent, {
+        childList: true,
+        subtree: true,
+      });
+    }
+
+    const sheet = $('#postSheet');
+    if (sheet) {
+      new MutationObserver(() => {
+        if (sheet.classList.contains('hidden')) {
+          renderToken += 1;
+          destroyCarousel();
+          pendingPostId = null;
+        } else {
+          requestAnimationFrame(upgradeSheet);
+        }
+      }).observe(sheet, {attributes: true, attributeFilter: ['class']});
+    }
+  }
+
+  install();
+})();
+
+(() => {
+  if (!document.querySelector('link[data-external-ai-style]')) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = './external-control.css?v=1';
+    link.dataset.externalAiStyle = '1';
+    document.head.appendChild(link);
+  }
+  if (!document.querySelector('script[data-external-ai-script]')) {
+    const script = document.createElement('script');
+    script.src = './external-control.js?v=1';
+    script.defer = true;
+    script.dataset.externalAiScript = '1';
+    document.head.appendChild(script);
+  }
+})();
+
+/* ==================== WORKSPACE ==================== */
+(() => {
+  'use strict';
+  const tg = window.Telegram?.WebApp;
+  const initData = tg?.initData || '';
+  const $ = (s, root = document) => root.querySelector(s);
+  const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+  const esc = (v = '') => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let channels = null;
+  let avatars = {sources:{}, targets:{}};
+  let syncing = false;
+  let sheetEntity = null;
+
+  async function api(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    headers.set('X-Telegram-Init-Data', initData);
+    if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+    const res = await fetch(path, {...options, headers});
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    return data;
+  }
+
+  function initials(value, fallback = 'AP') {
+    const clean = String(value || '').replace(/^@/, '').trim();
+    if (!clean) return fallback;
+    return clean.slice(0, 2).toUpperCase();
+  }
+
+  function applyAvatar(el, url, fallback) {
+    if (!el) return;
+    if (el.dataset.avatarApplied === String(url || 'fallback')) return;
+    el.dataset.avatarApplied = String(url || 'fallback');
+    el.classList.remove('avatar-fallback');
+    if (!url) {
+      el.innerHTML = esc(fallback);
+      el.classList.add('avatar-fallback');
+      return;
+    }
+    el.classList.add('avatar-loading');
+    const img = document.createElement('img');
+    img.alt = '';
+    img.decoding = 'async';
+    img.loading = 'lazy';
+    img.onload = () => el.classList.remove('avatar-loading');
+    img.onerror = () => {
+      el.classList.remove('avatar-loading');
+      el.classList.add('avatar-fallback');
+      el.textContent = fallback;
+    };
+    el.innerHTML = '';
+    el.append(img);
+    img.src = url;
+  }
+
+  function buildSheet() {
+    if ($('#channelActionBackdrop')) return;
+    const root = document.createElement('div');
+    root.id = 'channelActionBackdrop';
+    root.className = 'channel-action-backdrop';
+    root.innerHTML = '<section class="channel-action-sheet"><div class="channel-sheet-handle"></div><div id="channelSheetBody"></div></section>';
+    document.body.append(root);
+    root.addEventListener('click', e => {
+      if (e.target === root) closeSheet();
+    });
+  }
+
+  function closeSheet() {
+    const root = $('#channelActionBackdrop');
+    root?.classList.remove('open');
+    sheetEntity = null;
+  }
+
+  async function confirmText(text) {
+    if (tg?.showConfirm) return await new Promise(resolve => tg.showConfirm(text, resolve));
+    return window.confirm(text);
+  }
+
+  function openTelegram(url) {
+    if (!url) return;
+    if (tg?.openTelegramLink) tg.openTelegramLink(url);
+    else window.open(url, '_blank', 'noopener');
+  }
+
+  function headAvatar(entity) {
+    const kindMap = entity.kind === 'source' ? avatars.sources : avatars.targets;
+    const url = kindMap?.[String(entity.id)] || '';
+    const fallback = initials(entity.username || entity.title || entity.channel_ref, entity.kind === 'source' ? 'TG' : 'AP');
+    return `<div class="channel-avatar ${url ? 'avatar-loading' : 'avatar-fallback'}" data-sheet-avatar>${url ? `<img src="${esc(url)}" alt="">` : esc(fallback)}</div>`;
+  }
+
+  function openActions(entity) {
+    buildSheet();
+    sheetEntity = entity;
+    const body = $('#channelSheetBody');
+    const title = entity.kind === 'source' ? `@${entity.username}` : (entity.title || entity.channel_ref || 'Канал');
+    const sub = entity.kind === 'source'
+      ? `Новини → ${entity.target_title || 'канал не вибрано'}`
+      : `${entity.channel_ref || ''}${entity.source_count != null ? ` · ${entity.source_count} джерел` : ''}`;
+    const actions = [];
+    if (entity.url) actions.push(`<button class="channel-sheet-btn" data-sheet-action="open"><span>Відкрити в Telegram</span><span>↗</span></button>`);
+    if (entity.kind === 'source') {
+      actions.push(`<button class="channel-sheet-btn primary" data-sheet-action="route"><span>Змінити канал призначення</span><span>→</span></button>`);
+      actions.push(`<button class="channel-sheet-btn danger" data-sheet-action="delete-source"><span>Видалити джерело</span><span>⌫</span></button>`);
+    } else {
+      if (!entity.is_default) actions.push(`<button class="channel-sheet-btn primary" data-sheet-action="default"><span>Зробити основним</span><span>✓</span></button>`);
+      actions.push(`<button class="channel-sheet-btn danger" data-sheet-action="delete-target"><span>Видалити канал</span><span>⌫</span></button>`);
+    }
+    body.innerHTML = `<div class="channel-sheet-head">${headAvatar(entity)}<div class="channel-sheet-copy"><strong>${esc(title)}</strong><small>${esc(sub)}</small></div></div><div class="channel-sheet-actions">${actions.join('')}</div>`;
+    $$('[data-sheet-action]', body).forEach(btn => btn.addEventListener('click', () => handleSheetAction(btn.dataset.sheetAction)));
+    requestAnimationFrame(() => $('#channelActionBackdrop')?.classList.add('open'));
+    try { tg?.HapticFeedback?.impactOccurred('light'); } catch (_) {}
+  }
+
+  function renderRoutePicker(source) {
+    const body = $('#channelSheetBody');
+    if (!body || !channels) return;
+    const options = (channels.targets || []).map(t => {
+      const active = Number(source.target_id) === Number(t.id);
+      return `<button class="route-option ${active ? 'active' : ''}" data-route-target="${Number(t.id)}"><span>${esc(t.title || t.channel_ref)}</span><span>${active ? '✓' : '→'}</span></button>`;
+    }).join('');
+    body.innerHTML = `<div class="channel-sheet-head">${headAvatar(source)}<div class="channel-sheet-copy"><strong>@${esc(source.username)}</strong><small>Обери канал для нових постів</small></div></div><div class="route-picker"><div class="route-picker-title">Публікувати в</div>${options}</div>`;
+    $$('[data-route-target]', body).forEach(btn => btn.addEventListener('click', async () => {
+      try {
+        await api(`/api/channels/sources/${source.id}/route`, {method:'POST', body:JSON.stringify({target_id:Number(btn.dataset.routeTarget)})});
+        try { tg?.HapticFeedback?.notificationOccurred('success'); } catch (_) {}
+        closeSheet();
+        await refreshExistingChannelScreen();
+      } catch (e) { showAlert(e.message); }
+    }));
+  }
+
+  function showAlert(message) {
+    if (tg?.showAlert) tg.showAlert(String(message));
+    else window.alert(String(message));
+  }
+
+  async function handleSheetAction(action) {
+    const entity = sheetEntity;
+    if (!entity) return;
+    try {
+      if (action === 'open') return openTelegram(entity.url);
+      if (action === 'route') return renderRoutePicker(entity);
+      if (action === 'default') {
+        await api(`/api/channels/targets/${entity.id}/default`, {method:'POST'});
+        closeSheet();
+        await refreshExistingChannelScreen();
+        return;
+      }
+      if (action === 'delete-source') {
+        if (!(await confirmText(`Видалити @${entity.username} зі списку джерел?`))) return;
+        await api(`/api/channels/sources/${entity.id}`, {method:'DELETE'});
+        closeSheet();
+        await refreshExistingChannelScreen();
+        return;
+      }
+      if (action === 'delete-target') {
+        if (!(await confirmText(`Видалити канал ${entity.title || entity.channel_ref}? Джерела будуть перепризначені на інший активний канал.`))) return;
+        await api(`/api/channels/targets/${entity.id}`, {method:'DELETE'});
+        closeSheet();
+        await refreshExistingChannelScreen();
+      }
+    } catch (e) { showAlert(e.message); }
+  }
+
+  function replaceWithMore(actions, entity) {
+    const old = $('[data-route-source], [data-default-target]', actions);
+    if (!old || actions.querySelector('.channel-more')) return;
+    const more = document.createElement('button');
+    more.className = 'mini-btn channel-more';
+    more.type = 'button';
+    more.textContent = '⋯';
+    more.setAttribute('aria-label', 'Дії з каналом');
+    more.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openActions(entity); });
+    old.replaceWith(more);
+  }
+
+  function enhanceLists() {
+    if (!channels) return;
+    const targetCards = $$('#targetsList .channel-card');
+    targetCards.forEach((card, index) => {
+      const t = channels.targets?.[index];
+      if (!t) return;
+      const entity = {...t, kind:'target'};
+      applyAvatar($('.channel-avatar', card), avatars.targets?.[String(t.id)], initials(t.title || t.channel_ref, 'AP'));
+      replaceWithMore($('.channel-actions', card), entity);
+      card.dataset.proEnhanced = '1';
+    });
+    const sourceCards = $$('#sourcesList .source-card');
+    sourceCards.forEach((card, index) => {
+      const s = channels.sources?.[index];
+      if (!s) return;
+      const target = channels.targets?.find(t => Number(t.id) === Number(s.target_id));
+      const entity = {...s, kind:'source', target_title:target?.title || target?.channel_ref || ''};
+      applyAvatar($('.channel-avatar', card), avatars.sources?.[String(s.id)], initials(s.username, 'TG'));
+      replaceWithMore($('.channel-actions', card), entity);
+      card.dataset.proEnhanced = '1';
+    });
+  }
+
+  async function syncChannels() {
+    if (!initData || syncing) return;
+    syncing = true;
+    try {
+      [channels, avatars] = await Promise.all([
+        api('/api/channels'),
+        api('/api/channel-avatars').catch(() => ({sources:{}, targets:{}})),
+      ]);
+      enhanceLists();
+    } catch (_) {
+      // Existing channel UI remains fully functional if enhancement sync fails.
+    } finally { syncing = false; }
+  }
+
+  async function refreshExistingChannelScreen() {
+    const nav = $('[data-nav="channels"]');
+    nav?.click();
+    await new Promise(r => setTimeout(r, 180));
+    await syncChannels();
+  }
+
+  async function renderStorageStatus() {
+    try {
+      const s = await fetch('/healthz/storage').then(r => r.json());
+      const host = $('.version-note');
+      if (!host || $('#storageChip')) return;
+      const chip = document.createElement('div');
+      chip.id = 'storageChip';
+      chip.className = `storage-chip ${s.persistent ? '' : 'bad'}`.trim();
+      chip.innerHTML = `<i></i><span>${s.persistent ? 'DATA PERSISTENCE · ON' : 'DATA PERSISTENCE · NEEDS VOLUME'}</span>`;
+      host.before(chip);
+    } catch (_) {}
+  }
+
+  function observe() {
+    const targets = $('#targetsList');
+    const sources = $('#sourcesList');
+    const callback = () => {
+      const hasUnenhanced = $$('#targetsList .channel-card, #sourcesList .source-card').some(x => x.dataset.proEnhanced !== '1');
+      if (hasUnenhanced) setTimeout(syncChannels, 40);
+    };
+    if (targets) new MutationObserver(callback).observe(targets, {childList:true, subtree:false});
+    if (sources) new MutationObserver(callback).observe(sources, {childList:true, subtree:false});
+    $('[data-nav="channels"]')?.addEventListener('click', () => setTimeout(syncChannels, 140));
+  }
+
+  async function start() {
+    if (!initData) return;
+    buildSheet();
+    observe();
+    renderStorageStatus();
+    if ($('#screen-channels')?.classList.contains('active')) await syncChannels();
+  }
+
+  start();
+})();
+
+/* ==================== WEB & AI CONTROL ==================== */
+(() => {
+  'use strict';
+  const tg = window.Telegram?.WebApp;
+  const initData = tg?.initData || '';
+  if (!initData) return;
+  const $ = (s, root=document) => root.querySelector(s);
+  const haptic = (kind='light') => { try { tg?.HapticFeedback?.impactOccurred(kind); } catch (_) {} };
+  const notify = (kind='success') => { try { tg?.HapticFeedback?.notificationOccurred(kind); } catch (_) {} };
+
+  async function api(path, options={}) {
+    const headers = new Headers(options.headers || {});
+    headers.set('X-Telegram-Init-Data', initData);
+    if (options.body) headers.set('Content-Type','application/json');
+    const res = await fetch(path,{...options,headers,cache:'no-store'});
+    let data=null; try{data=await res.json()}catch(_){ }
+    if(!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    return data;
+  }
+
+  function toast(text,error=false){
+    const el=$('#toast'); if(!el)return;
+    el.textContent=text; el.classList.toggle('error',error); el.classList.remove('hidden');
+    clearTimeout(toast.t); toast.t=setTimeout(()=>el.classList.add('hidden'),2600);
+  }
+
+  function panelHTML(s){
+    const keyLabel=s.openai?.custom?'Власний API key':'Спільний Railway key';
+    const masked=s.openai?.masked || 'Railway / shared';
+    return `<div class="external-ai-panel" id="externalAiPanel">
+      <div class="x-head"><div><strong>Web Intelligence</strong><small>Зовнішні джерела, матчі та персональний AI</small></div><span class="x-live">AI ROUTING</span></div>
+      <div class="x-setting"><div class="copy"><strong>Зовнішні web-новини</strong><small>Порівняння незалежних спортивних джерел і WebRank</small></div><button class="x-toggle ${s.web_enabled?'on':''}" data-x-toggle="web"><i></i></button></div>
+      <div class="x-setting"><div class="copy"><strong>Щоденні топ-матчі</strong><small>До 5 найсильніших матчів дня з київським часом</small></div><button class="x-toggle ${s.daily_fixtures_enabled?'on':''}" data-x-toggle="fixtures"><i></i></button></div>
+      <div class="x-grid">
+        <label class="x-mini"><span>Мін. WebRank</span><input id="xWebRank" type="number" min="40" max="95" step="3" value="${Number(s.web_min_score||62)}"></label>
+        <label class="x-mini"><span>Web-постів / день</span><input id="xWebDaily" type="number" min="1" max="20" step="1" value="${Number(s.web_max_per_day||8)}"></label>
+      </div>
+      <div class="x-key-box">
+        <div class="x-key-status"><b>${keyLabel}</b><code>${masked}</code></div>
+        <div class="x-key-row"><input id="xOpenAiKey" type="password" autocomplete="off" placeholder="sk-..."><button id="xSaveKey" type="button">Зберегти</button></div>
+        ${s.openai?.custom?'<button id="xRemoveKey" class="x-remove-key" type="button">Видалити власний key і повернути shared</button>':''}
+        <div class="x-note">Ключ не повертається в Mini App після збереження. У базі він зберігається зашифровано окремо для твого workspace.</div>
+      </div>
+    </div>`;
+  }
+
+  async function load(){
+    const screen=$('#screen-settings'); if(!screen)return;
+    let host=$('#externalAiPanel');
+    try{
+      const s=await api('/api/external-control');
+      if(host) host.outerHTML=panelHTML(s);
+      else {
+        const automation=screen.querySelector('.settings-group.panel');
+        automation?.insertAdjacentHTML('afterend',panelHTML(s));
+      }
+      bind();
+    }catch(e){toast(e.message,true)}
+  }
+
+  async function patch(body){
+    try{await api('/api/external-control',{method:'PATCH',body:JSON.stringify(body)});notify('success');haptic('light');await load();toast('Налаштування збережено');}
+    catch(e){notify('error');toast(e.message,true)}
+  }
+
+  function bind(){
+    $('#externalAiPanel [data-x-toggle="web"]')?.addEventListener('click',e=>patch({web_enabled:!e.currentTarget.classList.contains('on')}));
+    $('#externalAiPanel [data-x-toggle="fixtures"]')?.addEventListener('click',e=>patch({daily_fixtures_enabled:!e.currentTarget.classList.contains('on')}));
+    $('#xWebRank')?.addEventListener('change',e=>patch({web_min_score:Math.max(40,Math.min(95,Number(e.target.value)||62))}));
+    $('#xWebDaily')?.addEventListener('change',e=>patch({web_max_per_day:Math.max(1,Math.min(20,Number(e.target.value)||8))}));
+    $('#xSaveKey')?.addEventListener('click',async()=>{
+      const input=$('#xOpenAiKey'); const key=(input?.value||'').trim();
+      if(key.length<20)return toast('Встав повний OpenAI API key',true);
+      try{input.disabled=true;await api('/api/openai-key',{method:'PUT',body:JSON.stringify({api_key:key})});input.value='';notify('success');await load();toast('Власний OpenAI key підключено');}
+      catch(e){notify('error');toast(e.message,true)}finally{if(input)input.disabled=false}
+    });
+    $('#xRemoveKey')?.addEventListener('click',async()=>{
+      try{await api('/api/openai-key',{method:'DELETE'});notify('success');await load();toast('Повернуто shared API key');}
+      catch(e){notify('error');toast(e.message,true)}
+    });
+  }
+
+  function install(){
+    const screen=$('#screen-settings'); if(!screen)return;
+    new MutationObserver(()=>{if(screen.classList.contains('active')&&!$('#externalAiPanel'))load()}).observe(screen,{attributes:true,attributeFilter:['class']});
+    document.addEventListener('click',e=>{if(e.target.closest?.('[data-nav="settings"]'))setTimeout(load,120)},true);
+    if(screen.classList.contains('active'))load();
+  }
+
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',install);else install();
 })();
