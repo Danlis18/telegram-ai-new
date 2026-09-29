@@ -30,7 +30,7 @@ from app.database import (
 )
 from app.formatting import post_html
 from app.publishing import get_photo_edit_mode, get_publish_mode, process_ready_automation
-from app.sources import SOURCES
+from app.source_whitelist import SOURCES
 from app.tenant import user_scope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
