@@ -3,25 +3,43 @@ import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application
 
-from app.auth import is_authorized_id
+from app.auth import is_authorized_id, is_owner_id
 from app.channel_workspace import ensure_channel_route_schema, register_channel_workspace_ui
 from app.channel_workspace_compact import install_compact_channel_page
 from app.content_policy import ensure_policy_schema
 from app.external_ai_ui import register_external_ai_ui
 from app.id_ui import register_id_handler
-from app.multiuser_ui import main_menu as base_main_menu, register_multiuser_ui, shared_guard
+from app.multiuser_ui import register_multiuser_ui, shared_guard
 from app.quota_ui import register_quota_ui
 from app.reader_policy import install_reader_policy
 from app.rejection_ui import register_rejection_ui
-from app.tenant import register_tenant_context
+from app.tenant import get_current_user_id, register_tenant_context
 
 
 def enhanced_main_menu() -> InlineKeyboardMarkup:
-    markup = base_main_menu()
-    rows = [list(row) for row in markup.inline_keyboard]
-    insert_at = max(0, len(rows) - 1)
-    rows.insert(insert_at, [InlineKeyboardButton("🌐 Web / AI", callback_data="external_ai")])
-    rows.insert(insert_at + 1, [InlineKeyboardButton("📊 Ліміти постів", callback_data="quota_settings")])
+    """Compact production menu: daily actions first, configuration second."""
+    uid = get_current_user_id()
+    rows = [
+        [
+            InlineKeyboardButton("📰 Черга", callback_data="queue"),
+            InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+        ],
+        [
+            InlineKeyboardButton("📺 Канали", callback_data="channels_menu"),
+            InlineKeyboardButton("⚙️ Система", callback_data="control"),
+        ],
+        [
+            InlineKeyboardButton("🌐 Web / AI", callback_data="external_ai"),
+            InlineKeyboardButton("🎨 AI / Фото", callback_data="ai_settings"),
+        ],
+        [
+            InlineKeyboardButton("📦 Архів", callback_data="archive"),
+            InlineKeyboardButton("⏱ Ліміти", callback_data="quota_settings"),
+        ],
+    ]
+    if is_owner_id(uid):
+        rows.append([InlineKeyboardButton("👥 Користувачі", callback_data="users_menu")])
+    rows.append([InlineKeyboardButton("ℹ️ Довідка", callback_data="help")])
     return InlineKeyboardMarkup(rows)
 
 
