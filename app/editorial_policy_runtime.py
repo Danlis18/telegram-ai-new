@@ -1,10 +1,7 @@
-import json
 import logging
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
-from app.config import settings
 
 log = logging.getLogger("telegram-ai-news.editorial-policy")
 
