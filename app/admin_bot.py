@@ -25,7 +25,7 @@ from app.database import (
 )
 from app.formatting import post_html
 from app.publish_ui import register_publish_ui, start_publish_worker, stop_publish_worker
-from app.sources import SOURCES
+from app.source_whitelist import SOURCES
 
 log = logging.getLogger("telegram-ai-news.admin-bot")
 def main_menu() -> InlineKeyboardMarkup:
