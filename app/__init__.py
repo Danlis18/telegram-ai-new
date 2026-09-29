@@ -1,0 +1,1 @@
+"""Auto Posting production application package.\n\nRuntime entrypoint: ``python -m app.safe_entrypoint``.\n"""\n
