@@ -1,9 +1,38 @@
+# Secrets / local configuration
 .env
+.env.*
+!.env.example
+
+# Telegram sessions
 *.session
 *.session-journal
+
+# Runtime databases / snapshots
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
 .venv/
 venv/
-data/
+
+# IDE / OS
+.vscode/
+.idea/
 .DS_Store
+
+# Runtime logs / temp
+*.log
+*.tmp
+tmp/
