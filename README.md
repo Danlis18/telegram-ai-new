@@ -55,7 +55,7 @@ This keeps startup easy to audit without changing the proven feature modules.
 | Channel/source routing | `app/channel_workspace.py` |
 | Premium publishing | `app/user_publisher.py` |
 | Premium emoji | `app/premium_emoji_support.py`, `app/premium_emoji_registry.py` |
-| Telegram source policy | `app/source_whitelist.py` |
+| Telegram source catalog + policy | `app/source_whitelist.py` |
 | Web discovery | `app/web_news_ingest.py` |
 | Daily top matches | `app/match_schedule.py` |
 | Editorial guardrails | `app/editorial_policy_runtime.py`, `app/ukrainian_output_runtime.py` |
@@ -122,6 +122,17 @@ Required in normal production:
 - Railway Volume mounted at `/data`
 
 Do not commit real API keys, Telegram sessions or proxy credentials.
+
+## Quality gates
+
+Every push to `main` runs `.github/workflows/quality.yml`. The structural check verifies:
+
+- Python syntax for every application module
+- internal `app.*` imports point to real modules
+- Mini App ships only the three production assets
+- Docker/Railway entrypoint contract stays intact
+- session/database/.env runtime artifacts are not committed
+- the approved Telegram source catalog has one source of truth
 
 ## Development rule
 
