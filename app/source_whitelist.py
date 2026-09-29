@@ -7,11 +7,29 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.utils import get_peer_id
 
 from app.config import settings
-from app.sources import SOURCES
 
 log = logging.getLogger("telegram-ai-news.source-whitelist")
 
-DEFAULT_SOURCES = tuple(dict.fromkeys(source.strip().lstrip("@").lower() for source in SOURCES if source.strip()))
+# Single source of truth for the owner's approved default Telegram feeds.
+# Keep this list small and intentional; users can still add their own sources per workspace.
+DEFAULT_SOURCES = (
+    "bfootballua",
+    "v1latsports",
+    "byi_bizhy",
+    "lateral_box1ng",
+    "breakevens",
+    "sportsuspilne",
+    "tatotake_ua",
+    "bombardyr_ua",
+    "v1lat",
+    "lateral_cs",
+    "football_time",
+    "tg_epl",
+    "sportvukr",
+    "tennisua",
+)
+
+SOURCES = list(DEFAULT_SOURCES)  # compatibility alias for existing seed/stat code
 
 
 async def _sync_persistent_sources() -> None:
