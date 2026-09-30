@@ -122,13 +122,29 @@
     const badge = $('#queueBadge');
     badge.textContent = queue > 99 ? '99+' : queue;
     badge.classList.toggle('hidden', !queue);
-    const online = b.system.reader_online && b.system.premium_publisher_online;
+    const webState = b.system.services?.web_discovery?.status || 'unknown';
+    const storageOk = !!b.system.storage_persistent;
+    const runtimeHealthy = b.system.runtime_healthy !== false;
+    const online = b.system.reader_online && b.system.premium_publisher_online && runtimeHealthy;
     $('#systemPill').classList.toggle('online', online);
     $('#systemPill span').textContent = online ? 'ONLINE' : 'CHECK';
     setStateBadge($('#readerState'), b.system.reader_online, b.system.reader_online ? 'ONLINE' : 'OFFLINE');
     setStateBadge($('#publisherState'), b.system.premium_publisher_online, b.system.premium_publisher_online ? 'PREMIUM' : 'OFFLINE');
     $('#publisherDesc').textContent = b.system.publisher_username ? `@${b.system.publisher_username}` : 'Публікація з Premium emoji';
     $('#publishModeState').textContent = (b.modes.publish || 'manual').toUpperCase();
+
+    const webRunning = ['running','online'].includes(webState);
+    setStateBadge($('#webWorkerState'), webRunning, webRunning ? 'ACTIVE' : webState.toUpperCase());
+    setStateBadge($('#storageState'), storageOk, storageOk ? 'DURABLE' : 'CHECK');
+    $('#storageDesc').textContent = storageOk
+      ? (b.system.storage_mode || 'Railway Volume')
+      : 'Потрібен persistent volume';
+
+    const uptime = Number(b.system.uptime_seconds || 0);
+    const days = Math.floor(uptime / 86400);
+    const hours = Math.floor((uptime % 86400) / 3600);
+    const mins = Math.floor((uptime % 3600) / 60);
+    $('#uptimeState').textContent = days ? `${days}д ${hours}г` : hours ? `${hours}г ${mins}хв` : `${mins}хв`;
   }
 
   function setStateBadge(el, ok, text) {
