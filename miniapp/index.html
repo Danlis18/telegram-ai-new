@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
   <meta name="theme-color" content="#030b1f" />
   <title>Auto Posting</title>
-  <link rel="stylesheet" href="./app.css?v=6" />
+  <link rel="stylesheet" href="./app.css?v=7" />
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -58,6 +58,12 @@
           <div class="system-row"><div><span class="system-name">Premium Publisher</span><span class="system-desc" id="publisherDesc">Публікація з Premium emoji</span></div><span id="publisherState" class="state-badge">…</span></div>
           <div class="divider"></div>
           <div class="system-row"><div><span class="system-name">Режим публікації</span><span class="system-desc">Керується окремо для workspace</span></div><span id="publishModeState" class="state-badge accent">…</span></div>
+          <div class="divider"></div>
+          <div class="system-row"><div><span class="system-name">Web Intelligence</span><span class="system-desc">Зовнішні джерела та ранжування</span></div><span id="webWorkerState" class="state-badge">…</span></div>
+          <div class="divider"></div>
+          <div class="system-row"><div><span class="system-name">Persistent Storage</span><span class="system-desc" id="storageDesc">Перевірка сховища</span></div><span id="storageState" class="state-badge">…</span></div>
+          <div class="divider"></div>
+          <div class="system-row"><div><span class="system-name">Uptime</span><span class="system-desc">Поточний production runtime</span></div><span id="uptimeState" class="state-badge accent">…</span></div>
         </div>
 
         <button id="analyticsButton" class="hidden" type="button"></button>
@@ -129,6 +135,6 @@
   <div id="toast" class="toast hidden"></div>
   <div id="loader" class="loader-overlay"><div class="loader-logo"></div><div class="loader-ring"></div><span>Auto Posting</span></div>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="./app.js?v=5"></script>
+  <script src="./app.js?v=6"></script>
 </body>
 </html>
