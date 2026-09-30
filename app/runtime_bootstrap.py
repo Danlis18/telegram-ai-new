@@ -19,6 +19,7 @@ from app.miniapp_bot_ui import install_miniapp_bot_ui
 from app.miniapp_channel_enhancements import install_channel_miniapp_enhancements
 from app.miniapp_server import miniapp_public_url, start_miniapp_server
 from app.persistence_runtime import prepare_persistence, start_persistence_backup_worker, storage_status
+from app.runtime_state import mark, track_task
 from app.premium_emoji_registry import install_telegram_emoji_learning, learn_from_existing_content
 from app.premium_emoji_support import install_premium_emoji_support
 from app.source_whitelist import install_source_whitelist
@@ -76,10 +77,27 @@ async def _reader_start_non_interactive() -> None:
 
 async def _prepare_infrastructure() -> None:
     await prepare_persistence()
-    start_persistence_backup_worker()
-    log.info("Storage status: %s", storage_status())
+    storage = storage_status()
+    backup_task = start_persistence_backup_worker()
+    if backup_task is not None:
+        track_task("persistence_backup", backup_task, detail="rolling SQLite snapshots")
+    mark(
+        "storage",
+        "online" if storage.get("persistent") else "warning",
+        detail=storage.get("mode") or "ephemeral",
+        persistent=bool(storage.get("persistent")),
+        database=storage.get("database") or "",
+    )
+    log.info("Storage status: %s", storage)
 
     proxy_state = await check_telegram_proxy(settings)
+    proxy_status = str(proxy_state.get("status") or "UNKNOWN").upper()
+    mark(
+        "telegram_proxy",
+        "online" if proxy_status == "ONLINE" else "warning",
+        detail=proxy_state.get("endpoint") or ("disabled" if not proxy_state.get("configured") else proxy_status),
+        configured=bool(proxy_state.get("configured")),
+    )
     log.info(
         "Telegram proxy startup status=%s configured=%s endpoint=%s",
         proxy_state.get("status"),
@@ -119,10 +137,17 @@ def _install_runtime_layers() -> None:
 
 async def _initialize_integrations() -> None:
     install_telegram_emoji_learning(app_main)
-    await learn_from_existing_content()
+    learned = await learn_from_existing_content()
+    mark("premium_emoji_registry", "online", detail=f"{int(learned or 0)} learned aliases")
 
     install_user_publisher()
-    await initialize_user_publisher()
+    publisher = await initialize_user_publisher()
+    mark(
+        "premium_publisher",
+        "online" if publisher.get("online") else "warning",
+        detail=(f"@{publisher.get('username')}" if publisher.get("username") else publisher.get("error") or "not configured"),
+        premium=bool(publisher.get("premium")),
+    )
 
     # Historical diagnostic posts are cleanup-only; this never sends a startup post.
     await remove_old_test_posts()
@@ -130,11 +155,16 @@ async def _initialize_integrations() -> None:
 
 async def _start_services() -> None:
     await start_miniapp_server()
+    mark("miniapp", "online", detail=miniapp_public_url() or "local")
 
     # Independent workers. Both respect workspace switches; web discovery also
     # requires usable branded media before a candidate reaches moderation.
-    start_match_schedule_worker()
-    start_web_news_worker()
+    match_task = start_match_schedule_worker()
+    web_task = start_web_news_worker()
+    if match_task is not None:
+        track_task("daily_matches", match_task, detail="top fixtures worker")
+    if web_task is not None:
+        track_task("web_discovery", web_task, detail="multisource sports discovery")
 
 
 def _install_admin_bot_runtime() -> None:
@@ -207,4 +237,5 @@ async def run_production() -> None:
     _install_admin_bot_runtime()
 
     app_main.reader.start = _reader_start_non_interactive
+    mark("runtime", "online", detail="production bootstrap complete")
     await app_main.main()
