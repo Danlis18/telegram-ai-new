@@ -198,7 +198,34 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "service": "auto-posting-miniapp"}
+    from app.runtime_state import compact_snapshot
+    return {
+        "ok": True,
+        "service": "auto-posting-miniapp",
+        "runtime": compact_snapshot(),
+    }
+
+
+@app.get("/readyz")
+async def readyz():
+    from app.persistence_runtime import storage_status
+    from app.runtime_state import compact_snapshot
+
+    storage = storage_status()
+    runtime = compact_snapshot()
+    ready = bool(storage.get("database"))
+    payload = {
+        "ok": ready,
+        "storage": {
+            "persistent": bool(storage.get("persistent")),
+            "mode": storage.get("mode"),
+            "database": storage.get("database"),
+        },
+        "runtime": runtime,
+    }
+    if not ready:
+        raise HTTPException(status_code=503, detail=payload)
+    return payload
 
 
 @app.get("/")
@@ -228,6 +255,11 @@ async def bootstrap(user=Depends(current_user)):
         reader_online = bool(app_main.reader.is_connected())
     except Exception:
         reader_online = False
+    from app.persistence_runtime import storage_status
+    from app.runtime_state import compact_snapshot
+
+    storage = storage_status()
+    runtime = compact_snapshot()
     return {
         "user": user["user"],
         "owner": is_owner_id(uid),
@@ -240,6 +272,11 @@ async def bootstrap(user=Depends(current_user)):
             "premium_publisher_online": bool(publisher.get("online")),
             "premium": bool(publisher.get("premium")),
             "publisher_username": publisher.get("username") or "",
+            "storage_persistent": bool(storage.get("persistent")),
+            "storage_mode": storage.get("mode") or "",
+            "runtime_healthy": bool(runtime.get("healthy")),
+            "uptime_seconds": int(runtime.get("uptime_seconds") or 0),
+            "services": runtime.get("services") or {},
         },
         "premium_palette": palette,
         "app_url": miniapp_public_url(),
